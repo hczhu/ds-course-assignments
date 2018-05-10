@@ -5,6 +5,7 @@ import (
   "encoding/json"
   "os"
   "log"
+  "sort"
 )
 
 	//
@@ -82,6 +83,7 @@ func doReduce(
   var prevKey string
   callReduce := func() {
     if len(values) > 0 {
+      sort.Strings(values)
       v := reduceF(prevKey, values)
       kv := KeyValue{prevKey, v}
       err := encoder.Encode(&kv)

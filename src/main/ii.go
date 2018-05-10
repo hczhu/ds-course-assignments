@@ -5,21 +5,25 @@ import "fmt"
 import "mapreduce"
 import "strings"
 import "unicode"
+import "strconv"
 
 // The mapping function is called once for each piece of the input.
 // In this framework, the key is the name of the file that is being processed,
 // and the value is the file's contents. The return value should be a slice of
 // key/value pairs, each represented by a mapreduce.KeyValue.
-func mapF(document string, value string) (res []mapreduce.KeyValue) {
+func mapF(document string, value string) []mapreduce.KeyValue {
 	// Your code here (Part V).
 	f := func(c rune) bool {
 		return !unicode.IsLetter(c)
 	}
 	words := strings.FieldsFunc(value, f)
-  kvs := make([]mapreduce.KeyValue, len(words))
-  for i, _ := range kvs {
-    kvs[i].Key = words[i]
-    kvs[i].Value = document
+  kvs := make([]mapreduce.KeyValue, 0)
+  mp := make(map[string]int)
+  for _, w := range words {
+    mp[w]++
+    if mp[w] == 1 {
+      kvs = append(kvs, mapreduce.KeyValue{w, document})
+    }
   }
   return kvs
 }
@@ -28,7 +32,17 @@ func mapF(document string, value string) (res []mapreduce.KeyValue) {
 // list of that key's string value (merged across all inputs). The return value
 // should be a single output value for that key.
 func reduceF(key string, values []string) string {
-  return strings.Join(values, "," )
+  n := 1
+  for i := 1; i < len(values); i++ {
+    if values[i] != values[n - 1] {
+      if n < i {
+        values[n] = values[i]
+      }
+      n++
+    }
+  }
+  values = values[0:n]
+  return strconv.Itoa(len(values)) + " " + strings.Join(values, "," )
 }
 
 // Can be run in 3 ways:

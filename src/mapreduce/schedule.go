@@ -1,6 +1,9 @@
 package mapreduce
 
-import "fmt"
+import (
+  "fmt"
+  "sync"
+)
 
 //
 // schedule() starts and waits for all tasks in the given phase (mapPhase
@@ -11,6 +14,7 @@ import "fmt"
 // suitable for passing to call(). registerChan will yield all
 // existing registered workers (if any) and new ones as they register.
 //
+
 func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, registerChan chan string) {
 	var ntasks int
 	var n_other int // number of inputs (for reduce) or outputs (for map)
@@ -30,5 +34,42 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 	//
 	// Your code here (Part III, Part IV).
 	//
+  tasksDone := make([]bool, ntasks)
+  for {
+    pending := false
+    var wg sync.WaitGroup
+    for t := 0; t < ntasks; t++ {
+      if (tasksDone[t]) {
+        continue
+      }
+      pending = true
+      wk := <-registerChan
+      wg.Add(1)
+      taskId := t
+      go func() {
+        f := ""
+        if taskId < len(mapFiles) {
+          f = mapFiles[taskId]
+        }
+        args := DoTaskArgs{
+          jobName,
+          f,
+          phase,
+          taskId,
+          n_other,
+        }
+        tasksDone[taskId] = call(wk, "Worker.DoTask", &args, nil)
+        if !tasksDone[taskId] {
+          fmt.Printf("Faield to run task %d on worker %s\n", taskId, wk)
+        }
+        registerChan <- wk
+        wg.Done()
+      }()
+    }
+    if !pending {
+      break
+    }
+    wg.Wait()
+  }
 	fmt.Printf("Schedule: %v done\n", phase)
 }

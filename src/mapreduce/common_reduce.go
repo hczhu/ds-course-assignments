@@ -78,17 +78,33 @@ func doReduce(
   }
   defer f.Close()
   encoder := json.NewEncoder(f)
+  values := make([]string, 0)
+  var prevKey string
+  callReduce := func() {
+    if len(values) > 0 {
+      v := reduceF(prevKey, values)
+      kv := KeyValue{prevKey, v}
+      err := encoder.Encode(&kv)
+      if err != nil {
+        log.Fatal("Failed to encode a KV ", kv, " to file: ", outFile)
+      }
+    }
+  }
   for hp.Len() > 0 {
     r := heap.Pop(hp).(int)
-    err := encoder.Encode(&hp.KVs[r])
-    if err != nil {
-      log.Fatal("Failed to encode a KV ", hp.KVs[r], " to file: ", outFile)
+    if hp.KVs[r].Key == prevKey {
+      values = append(values, hp.KVs[r].Value)
+    } else {
+      callReduce()
+      values = []string{hp.KVs[r].Value}
+      prevKey = hp.KVs[r].Key
     }
     err = decoders[r].Decode(&hp.KVs[r])
     if err == nil {
       heap.Push(hp, r)
     }
   }
+  callReduce()
 }
 
 // An IntHeap is a min-heap of ints.

@@ -222,9 +222,11 @@ func (cfg *config) checkTimeout() {
 }
 
 func (cfg *config) cleanup() {
+  fmt.Println("Cleaning up...")
 	for i := 0; i < len(cfg.rafts); i++ {
 		if cfg.rafts[i] != nil {
 			cfg.rafts[i].Kill()
+      fmt.Println("Killed peer", i)
 		}
 	}
 	cfg.net.Cleanup()
@@ -330,12 +332,16 @@ func (cfg *config) checkOneLeader() int {
 // check that everyone agrees on the term.
 func (cfg *config) checkTerms() int {
 	term := -1
+  fmt.Println("Checking terms for ", cfg.n, " peers")
 	for i := 0; i < cfg.n; i++ {
 		if cfg.connected[i] {
+      fmt.Println("Getting internal state for peer ", i)
 			xterm, _ := cfg.rafts[i].GetState()
+      fmt.Println("Got internal state for peer ", i, xterm)
 			if term == -1 {
 				term = xterm
 			} else if term != xterm {
+        fmt.Println("Servers disagree on terms")
 				cfg.t.Fatalf("servers disagree on term")
 			}
 		}

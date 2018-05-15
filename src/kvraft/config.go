@@ -67,6 +67,8 @@ func (cfg *config) checkTimeout() {
 }
 
 func (cfg *config) cleanup() {
+  fmt.Println("Cleaning up...")
+  os.Stdout.Sync()
 	cfg.mu.Lock()
 	defer cfg.mu.Unlock()
 	for i := 0; i < len(cfg.kvservers); i++ {

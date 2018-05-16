@@ -130,9 +130,15 @@ func (rf *Raft) updateTerm(peerTerm int) bool {
 
 // RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestReply) {
-  rf.updateTerm(args.Term)
+  termUpdated := rf.updateTerm(args.Term)
   rf.Lock()
   defer rf.Unlock()
+  defer func() {
+    if !termUpdated && reply.Success {
+      // Reset election timer
+      rf.af.Transit(Follower)
+    }
+  }()
 
   reply.Term = rf.currentTerm
   reply.Success = false

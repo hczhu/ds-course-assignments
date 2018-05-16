@@ -325,23 +325,19 @@ func (cfg *config) checkOneLeader() int {
 			return leaders[lastTermWithLeader][0]
 		}
 	}
-	cfg.t.Fatalf("expected one leader, got none")
+	panic("expected one leader, got none")
 	return -1
 }
 
 // check that everyone agrees on the term.
 func (cfg *config) checkTerms() int {
 	term := -1
-  fmt.Println("Checking terms for ", cfg.n, " peers")
 	for i := 0; i < cfg.n; i++ {
 		if cfg.connected[i] {
-      fmt.Println("Getting internal state for peer ", i)
 			xterm, _ := cfg.rafts[i].GetState()
-      fmt.Println("Got internal state for peer ", i, xterm)
 			if term == -1 {
 				term = xterm
 			} else if term != xterm {
-        fmt.Println("Servers disagree on terms")
 				cfg.t.Fatalf("servers disagree on term")
 			}
 		}

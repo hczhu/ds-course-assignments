@@ -24,7 +24,7 @@ import "fmt"
 import "bytes"
 import "labgob"
 import "time"
-import "log"
+// import "log"
 import "math/rand"
 // import "math"
 
@@ -43,7 +43,7 @@ var gStartTime time.Time = time.Now()
 
 func assert(cond bool, format string, v ...interface {}) {
   if !cond {
-    log.Fatalf(format, v...)
+    panic(fmt.Sprintf(format, v...))
   }
 }
 
@@ -114,20 +114,28 @@ func decodeReply(data Bytes) (reply RequestReply) {
 	return
 }
 
+// Returns true if 'currentTerm' got updated to peerTerm
+// No lock should be held by the caller
+func (rf *Raft) updateTerm(peerTerm int) bool {
+  rf.Lock()
+  defer rf.Unlock()
+  if rf.currentTerm < peerTerm {
+    rf.currentTerm = peerTerm
+    rf.votedFor = -1
+    rf.af.Transit(Follower)
+    return true
+  }
+  return false
+}
+
 // RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestReply) {
+  termUpdated := rf.updateTerm(args.Term)
   rf.Lock()
   defer rf.Unlock()
   defer func() {
-    termUpdated := false
-    if rf.currentTerm < args.Term {
-      rf.currentTerm = args.Term
-      termUpdated = true
-    }
-    if reply.Success || termUpdated {
-      // Reset election timer after having voted for another
-      rf.af.Transit(Follower)
-    }
+    assert(!reply.Success || termUpdated,
+      "Must have a term update when request vote succeeded")
   }()
 
   reply.Term = rf.currentTerm
@@ -144,7 +152,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestReply) {
   reply.Success = true
   // Can the following steps be done asynchronously (after returning the RPC)?
   rf.votedFor = args.CandidateId
-  rf.Log("Voted for %d", rf.votedFor)
+  rf.Log("Voted for %d during term %d", rf.votedFor, rf.currentTerm)
 }
 
 //
@@ -183,6 +191,8 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 // Receiver's handler
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *RequestReply) {
+  termUpdated := rf.updateTerm(args.Term)
+
   rf.Lock()
   defer rf.Unlock()
 
@@ -192,17 +202,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *RequestReply) {
     // out-of-date leader
     return
   }
-
+  rf.leader = args.LeaderId
   defer func() {
-    rf.leader = args.LeaderId
-    if args.Term > rf.currentTerm {
-      rf.currentTerm = args.Term
-      rf.af.Transit(Follower)
-    } else {
-      assert(args.Term == rf.currentTerm, "Should have the same term")
-      role := rf.af.GetState()
-      isLeader := role == PreLeader || role == Leader
-      assert(!isLeader, "One term shuldn't have 2 leaders")
+    if !termUpdated {
+      // Reset election timer
       rf.af.Transit(Follower)
     }
   }()
@@ -311,26 +314,24 @@ func (rf *Raft) onCandidate(af *AsyncFSA) int {
       ch <- encodeReply(reply)
     }()
   }
-
+  rf.Log("Fanning out RequestVote %+v", args)
   votes := 1
   for 2 * votes <= len(rf.peers) {
     timeout, it, nextSt := rf.af.MultiWaitCh(ch, timeoutCh)
     if timeout {
+      rf.Log("RequestVote timeouts")
       return Candidate
     }
     if nextSt >= 0 {
+      rf.Log("RequestVote got interrupted by state %d", nextSt)
       return nextSt
     }
     if it != nil {
       reply := decodeReply(it)
-      rf.Lock()
-      if reply.Term > rf.currentTerm {
-        rf.currentTerm = reply.Term
-        rf.Unlock()
+      rf.Log("Got RequestVote reply: %+v", reply)
+      if rf.updateTerm(reply.Term) {
         return Follower
       }
-      rf.Unlock()
-
       if reply.Success {
         votes++
       }
@@ -386,18 +387,14 @@ func (rf *Raft) sendHeartbeats(af *AsyncFSA) int {
     }
     assert(replyBytes != nil, "Should have got a reply")
     reply := decodeReply(replyBytes)
-    rf.Lock()
-    if reply.Term > rf.currentTerm {
-      rf.currentTerm = reply.Term
-      rf.Unlock()
+    if rf.updateTerm(reply.Term) {
       return Follower
     }
-    rf.Unlock()
   }
 }
 
 func (rf *Raft)onPreLeader(af *AsyncFSA) int {
-  rf.Log("Became leader")
+  rf.Log("Became leader at term %d", rf.currentTerm)
   rf.Lock()
   rf.nextIndex = make([]int, len(rf.peers))
   rf.matchIndex = make([]int, len(rf.peers))

@@ -212,11 +212,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *RequestReply) {
     }
   }()
 
-  if len(args.Entries) == 0 {
-    return
-  }
-
-  // Fix me!!!
   if args.PrevLogIndex >= len(rf.log) ||
      args.PrevLogTerm != rf.log[args.PrevLogIndex].Term {
     return
@@ -227,7 +222,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *RequestReply) {
       rf.log[args.PrevLogIndex + matchedLen + 1].Term == args.Entries[matchedLen].Term {
     matchedLen++
   }
+  rf.log = rf.log[:args.PrevLogTerm + matchedLen + 1]
+  for ;matchedLen < len(args.Entries); matchedLen++ {
+    rf.log = append(rf.log, args.Entries[matchedLen])
+  }
   reply.Success = true
+  if args.LeaderCommit > rf.commitIndex {
+    rf.commitIndex = args.LeaderCommit
+    if rf.commitIndex > len(rf.log) - 1 {
+      rf.commitIndex = len(rf.log) - 1
+    }
+  }
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *RequestReply) bool {
@@ -343,7 +348,8 @@ func (rf *Raft) onCandidate(af *AsyncFSA) int {
   return PreLeader
 }
 
-func (rf *Raft) fanOutAppendEntries(entries []LogEntry) Gchan {
+func (rf *Raft) fanOutAppendEntriesWithTimeout(entries []LogEntry, timeout time.Duration, af *AsyncFSA) {
+  toCh := time.After(timeout)
   rf.Lock()
   argsTemp := AppendEntriesArgs{
     Term: rf.currentTerm,
@@ -354,7 +360,7 @@ func (rf *Raft) fanOutAppendEntries(entries []LogEntry) Gchan {
     LeaderCommit: rf.commitIndex,
   }
   rf.Unlock()
-  gchan := make(Gchan, len(rf.peers))
+  replyChan := make(Gchan, len(rf.peers))
   for p, _ := range rf.peers {
     if p == rf.me {
       continue
@@ -373,18 +379,13 @@ func (rf *Raft) fanOutAppendEntries(entries []LogEntry) Gchan {
       gchan <- encodeReply(reply)
     }()
   }
-  return gchan
-}
-
-func (rf *Raft) sendHeartbeats(af *AsyncFSA) int {
-  toCh := time.After(HeartbeatMil * time.Millisecond)
-  replyChan := rf.fanOutAppendEntries([]LogEntry{})
   for {
     timeout, replyBytes, nextSt := af.MultiWaitCh(replyChan, toCh)
     if timeout {
-      return Leader
+      break
     }
     if nextSt >= 0 {
+      // Interrupted
       return nextSt
     }
     assert(replyBytes != nil, "Should have got a reply")
@@ -393,6 +394,7 @@ func (rf *Raft) sendHeartbeats(af *AsyncFSA) int {
       return Follower
     }
   }
+  return Leader
 }
 
 func (rf *Raft)onPreLeader(af *AsyncFSA) int {

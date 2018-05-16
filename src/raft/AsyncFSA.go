@@ -67,7 +67,6 @@ func (af *AsyncFSA)Start() {
     // of AsyncFSA.
     for {
       st := af.GetState()
-      af.logger("AsyncFSA is running at state: %d", st)
       callback, ok := af.transMap[st]
       if !ok {
         af.logger("Exiting AsyncFSA.")
@@ -75,6 +74,9 @@ func (af *AsyncFSA)Start() {
       }
       nextSt := callback(af)
       af.setState(nextSt)
+      if nextSt != st {
+        af.logger("AsyncFSA transited to state: %d", nextSt)
+      }
     }
     af.wg.Done()
   }()
@@ -90,9 +92,7 @@ func (af *AsyncFSA)Wait() {
 }
 
 func (af *AsyncFSA)Transit(st int) {
-  if st != af.GetState() {
-    af.msgQ<-st
-  }
+  af.msgQ<-st
 }
 
 // Return -1, if timeout

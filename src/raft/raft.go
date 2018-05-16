@@ -130,13 +130,9 @@ func (rf *Raft) updateTerm(peerTerm int) bool {
 
 // RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestReply) {
-  termUpdated := rf.updateTerm(args.Term)
+  rf.updateTerm(args.Term)
   rf.Lock()
   defer rf.Unlock()
-  defer func() {
-    assert(!reply.Success || termUpdated,
-      "Must have a term update when request vote succeeded")
-  }()
 
   reply.Term = rf.currentTerm
   reply.Success = false
@@ -314,21 +310,21 @@ func (rf *Raft) onCandidate(af *AsyncFSA) int {
       ch <- encodeReply(reply)
     }()
   }
-  rf.Log("Fanning out RequestVote %+v", args)
+  // rf.Log("Fanning out RequestVote %+v", args)
   votes := 1
   for 2 * votes <= len(rf.peers) {
     timeout, it, nextSt := rf.af.MultiWaitCh(ch, timeoutCh)
     if timeout {
-      rf.Log("RequestVote timeouts")
+      // rf.Log("RequestVote timeouts")
       return Candidate
     }
     if nextSt >= 0 {
-      rf.Log("RequestVote got interrupted by state %d", nextSt)
+      // rf.Log("RequestVote got interrupted by state %d", nextSt)
       return nextSt
     }
     if it != nil {
       reply := decodeReply(it)
-      rf.Log("Got RequestVote reply: %+v", reply)
+      // rf.Log("Got RequestVote reply: %+v", reply)
       if rf.updateTerm(reply.Term) {
         return Follower
       }

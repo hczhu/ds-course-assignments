@@ -408,6 +408,7 @@ func TestBackup2B(t *testing.T) {
 	for i := 0; i < servers; i++ {
 		cfg.connect(i)
 	}
+  fmt.Println("Last cfg.one()")
 	cfg.one(cmd, servers, true)
 
   fmt.Println("Ending")

@@ -291,6 +291,7 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
   for {
     select {
       case <-toCh:
+        rf.Log("Agreement timeouts")
         return
       case logIndex := <-rf.appliedLogIndex:
         if logIndex >= index {

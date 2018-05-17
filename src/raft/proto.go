@@ -25,7 +25,11 @@ type LogEntry struct {
 	Cmd interface{}
 }
 
-//
+// Used to wake up a goroutine
+// false: wait up and exit
+// true: wait up and continue work
+type WakeupChan chan bool
+
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
@@ -33,6 +37,7 @@ type Raft struct {
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
+  applyCh chan ApplyMsg
 
   sync.Mutex
   // For all servers
@@ -51,6 +56,10 @@ type Raft struct {
 
   // --- The members above are protectd by the 'Mutex'
   af *AsyncFSA
+
+  applierWakeup WakeupChan
+
+  killed bool
 }
 
 // example RequestVote RPC arguments structure.
@@ -72,6 +81,10 @@ type RequestReply struct {
   //    and prevLogTerm
   // RequestVote(): true if success
   Success bool
+  // Which server is this reply from?
+  Peer int
+  // How many entries of the leader at the moment the request was sent?
+  NumLeaderLogEntries int
 }
 
 type AppendEntriesArgs struct {

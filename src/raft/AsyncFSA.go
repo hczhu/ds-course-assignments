@@ -70,6 +70,7 @@ func (af *AsyncFSA)Start() {
       callback, ok := af.transMap[st]
       if !ok {
         af.logger("Exiting AsyncFSA.")
+        af.setState(StopState)
         break
       }
       nextSt := callback(af)
@@ -119,6 +120,10 @@ func (af *AsyncFSA) MultiWaitCh(gchan Gchan, toCh <-chan time.Time) (
   }
   log.Fatal("Shouldn't reach here")
   return false, nil, -1
+}
+
+func (af *AsyncFSA) isRunning() bool {
+  return af.GetState() != StopState
 }
 
 /*

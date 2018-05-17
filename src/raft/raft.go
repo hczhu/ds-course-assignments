@@ -59,7 +59,7 @@ func (rf *Raft) GetState() (int, bool) {
   rf.Lock()
   defer rf.Unlock()
 
-	return rf.currentTerm, rf.af.GetState() == Leader
+	return rf.currentTerm, rf.af.GetState() == Leader || rf.af.GetState() == PreLeader
 }
 
 //
@@ -131,6 +131,7 @@ func (rf *Raft) updateTerm(peerTerm int) bool {
 // RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestReply) {
   termUpdated := rf.updateTerm(args.Term)
+
   rf.Lock()
   defer rf.Unlock()
   defer func() {
@@ -141,6 +142,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestReply) {
   }()
 
   reply.Term = rf.currentTerm
+  reply.Peer = rf.me
   reply.Success = false
   if args.Term < rf.currentTerm ||
       (rf.votedFor >=0 && rf.votedFor != args.CandidateId) {
@@ -197,8 +199,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *RequestReply) {
 
   rf.Lock()
   defer rf.Unlock()
+  defer func() {
+    if rf.commitIndex > rf.lastApplied {
+      rf.applierWakeup<-true
+    }
+  }()
 
   reply.Term = rf.currentTerm
+  reply.Peer = rf.me
   reply.Success = false
   if args.Term < rf.currentTerm {
     // out-of-date leader
@@ -272,6 +280,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // turn off debug output from this instance.
 //
 func (rf *Raft) Kill() {
+  rf.killed = true
+  rf.applierWakeup<-false
   rf.af.Stop()
 }
 
@@ -348,37 +358,63 @@ func (rf *Raft) onCandidate(af *AsyncFSA) int {
   return PreLeader
 }
 
-func (rf *Raft) fanOutAppendEntriesWithTimeout(entries []LogEntry, timeout time.Duration, af *AsyncFSA) {
-  toCh := time.After(timeout)
-  rf.Lock()
-  argsTemp := AppendEntriesArgs{
-    Term: rf.currentTerm,
-    LeaderId: rf.me,
-    PrevLogIndex: 0,
-    PrevLogTerm: 0,
-    Entries: entries,
-    LeaderCommit: rf.commitIndex,
+func (rf *Raft) replicateLogs(af *AsyncFSA) int {
+  toCh := time.After(getHearbeatTimeout())
+  gchan := make(Gchan, len(rf.peers))
+
+  sendOne := func (peer int) {
+    rf.Lock()
+    args := AppendEntriesArgs{
+      Term: rf.currentTerm,
+      LeaderId: rf.me,
+      PrevLogIndex: rf.nextIndex[peer] - 1,
+      PrevLogTerm: rf.log[rf.nextIndex[peer] - 1].Term,
+      Entries: rf.log[rf.nextIndex[peer]:],
+      LeaderCommit: rf.commitIndex,
+    }
+    rf.Unlock()
+    reply := RequestReply{}
+    ok := rf.sendAppendEntries(peer, &args, &reply)
+    if ok {
+      reply.Peer = peer
+      // Have to keep this number because 'rf.log' may change later
+      reply.NumLeaderLogEntries = args.PrevLogIndex + 1 + len(args.Entries)
+      gchan <- encodeReply(reply)
+    }
   }
-  rf.Unlock()
+
+  updateMatchIndex := func(peer, numLeaderLogEntries int) {
+    rf.Lock()
+    defer rf.Unlock()
+    rf.nextIndex[peer] = numLeaderLogEntries
+    rf.matchIndex[peer] = numLeaderLogEntries - 1
+    N := rf.matchIndex[peer]
+    if N > rf.commitIndex && rf.log[N].Term == rf.currentTerm {
+      numGoodPeers := 0
+      for _, match := range rf.matchIndex {
+        if match >= N {
+          numGoodPeers++
+          if 2 * numGoodPeers > len(rf.peers) {
+            rf.commitIndex = N
+            if rf.commitIndex > rf.lastApplied {
+              rf.applierWakeup<-true
+            }
+            break
+          }
+        }
+      }
+    }
+  }
+
   replyChan := make(Gchan, len(rf.peers))
   for p, _ := range rf.peers {
     if p == rf.me {
       continue
     }
     peer := p
-    args := argsTemp
-    args.PrevLogIndex = rf.nextIndex[p] - 1
-    args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
-    go func() {
-      reply := RequestReply{}
-      ok := rf.sendAppendEntries(peer, &args, &reply)
-      if !ok {
-        reply.Term = -1
-        reply.Success = false
-      }
-      gchan <- encodeReply(reply)
-    }()
+    go sendOne(peer)
   }
+
   for {
     timeout, replyBytes, nextSt := af.MultiWaitCh(replyChan, toCh)
     if timeout {
@@ -393,30 +429,34 @@ func (rf *Raft) fanOutAppendEntriesWithTimeout(entries []LogEntry, timeout time.
     if rf.updateTerm(reply.Term) {
       return Follower
     }
+    if reply.Success {
+      updateMatchIndex(reply.Peer, reply.NumLeaderLogEntries)
+    } else {
+      rf.Lock()
+      rf.nextIndex[reply.Peer]--
+      rf.Unlock()
+      assert(rf.nextIndex[reply.Peer] > 0, "next index shouldn't reach 0")
+      go sendOne(reply.Peer)
+    }
   }
   return Leader
 }
 
 func (rf *Raft)onPreLeader(af *AsyncFSA) int {
   rf.Log("Became leader at term %d", rf.currentTerm)
-  rf.Lock()
   rf.nextIndex = make([]int, len(rf.peers))
   rf.matchIndex = make([]int, len(rf.peers))
+  rf.Lock()
   for i, _ := range rf.nextIndex {
     rf.nextIndex[i] = len(rf.log)
     rf.matchIndex[i] = 0
   }
   rf.Unlock()
-  return rf.sendHeartbeats(af)
+  return Leader
 }
 
 func (rf *Raft)onLeader(af *AsyncFSA) int {
-  timeout, _, nextSt := rf.af.MultiWait(nil, getHearbeatTimeout())
-  if nextSt >= 0 {
-    return nextSt
-  }
-  assert(timeout, "Should timeout!")
-  return rf.sendHeartbeats(af)
+  return rf.replicateLogs(af)
 }
 
 //
@@ -437,6 +477,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+  rf.applyCh = applyCh
 
   rf.currentTerm = 1
   rf.votedFor = -1
@@ -447,6 +488,28 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
   rf.commitIndex = 0
   rf.lastApplied = 0
+
+  rf.applierWakeup = make(WakeupChan, 10)
+  go func() {
+    for {
+      if live := <-rf.applierWakeup; !live {
+        break
+      }
+      for rf.lastApplied < rf.commitIndex {
+        rf.Lock()
+        msg := ApplyMsg{
+          CommandValid: true,
+          Command: rf.log[rf.lastApplied + 1].Cmd,
+          CommandIndex: rf.lastApplied + 1,
+        }
+        rf.Unlock()
+        rf.Log("Applied %+v", msg)
+        rf.applyCh<-msg
+        // No other threads touch 'lastApplied'
+        rf.lastApplied++
+      }
+    }
+  }()
 
   rf.af = MakeAsyncFSA(Follower)
   rf.af.AddCallback(Follower, rf.onFollower).AddCallback(

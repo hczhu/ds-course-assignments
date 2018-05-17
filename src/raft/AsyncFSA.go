@@ -10,6 +10,7 @@ type Callback func(af *AsyncFSA)int
 type Gchan chan []byte
 type Bytes []byte
 type Logger func(string, ...interface {})
+type CdataCob func(st int, cdata *CoreData)
 
 const (
   StopState = 123456789
@@ -20,22 +21,35 @@ type AsyncFSA struct {
   msgQ chan int
 
   wg sync.WaitGroup
-
-	mx sync.RWMutex
-  st int
-
   logger Logger
+
+	sync.RWMutex
+  st int
+  cdata CoreData
 }
 
-func MakeAsyncFSA(initStat int) *AsyncFSA {
+func MakeAsyncFSA(initStat int, cdata CoreData) *AsyncFSA {
   af := &AsyncFSA{}
   af.transMap = make(map[int]Callback)
   af.msgQ = make(chan int, 100)
   af.st = initStat
+  af.cdata = cdata
   af.logger = func(format string, v ...interface{}) {
     fmt.Println(fmt.Sprintf(format, v...))
   }
   return af
+}
+
+func (af *AsyncFSA)WithRlock(callback CdataCob) {
+  af.RLock()
+  defer af.RUnlock()
+  callback(af.st, &af.cdata)
+}
+
+func (af *AsyncFSA)WithLock(callback CdataCob) {
+  af.Lock()
+  defer af.Unlock()
+  callback(af.st, &af.cdata)
 }
 
 func (af *AsyncFSA)SetLogger(logger Logger) *AsyncFSA{
@@ -48,16 +62,15 @@ func (af *AsyncFSA)AddCallback(st int, callback Callback) *AsyncFSA{
   return af
 }
 
-func (af *AsyncFSA)GetState() int {
-  af.mx.RLock()
-  defer af.mx.RUnlock()
+func (af *AsyncFSA)getState() int {
+  af.RLock()
+  defer af.RUnlock()
   return af.st
 }
-
 func (af *AsyncFSA)setState(st int) {
-  af.mx.Lock()
+  af.Lock()
+  defer af.Unlock()
   af.st = st
-  af.mx.Unlock()
 }
 
 func (af *AsyncFSA)Start() {
@@ -66,7 +79,7 @@ func (af *AsyncFSA)Start() {
     // This is the only thread which modifies the internal state
     // of AsyncFSA.
     for {
-      st := af.GetState()
+      st := af.getState()
       callback, ok := af.transMap[st]
       if !ok {
         af.logger("Exiting AsyncFSA.")
@@ -120,10 +133,6 @@ func (af *AsyncFSA) MultiWaitCh(gchan Gchan, toCh <-chan time.Time) (
   }
   log.Fatal("Shouldn't reach here")
   return false, nil, -1
-}
-
-func (af *AsyncFSA) isRunning() bool {
-  return af.GetState() != StopState
 }
 
 /*

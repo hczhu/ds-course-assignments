@@ -43,6 +43,13 @@ var gStartTime time.Time = time.Now()
 
 var gPrintLog bool = true
 
+func min(a, b int) int {
+  if a < b {
+    return a
+  }
+  return b
+}
+
 func assert(cond bool, format string, v ...interface {}) {
   if !cond {
     panic(fmt.Sprintf(format, v...))
@@ -60,11 +67,12 @@ func (rf *Raft) Log(format string, v ...interface {}) {
 
 // return currentTerm and whether this server
 // believes it is the leader.
-func (rf *Raft) GetState() (int, bool) {
-  rf.Lock()
-  defer rf.Unlock()
-
-	return rf.currentTerm, rf.af.GetState() == Leader || rf.af.GetState() == PreLeader
+func (rf *Raft) GetState() (term int, isLeader bool) {
+  term, isLeader = -1, false
+  rf.af.WithRlock(func(st int, cdata *CoreData) {
+	  term, isLeader = cdata.currentTerm, st == Leader || st == PreLeader
+  })
+  return
 }
 
 //
@@ -75,9 +83,12 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	e.Encode(rf.currentTerm)
-	e.Encode(rf.votedFor)
-  e.Encode(rf.log)
+
+  rf.af.WithRlock(func(st int, cdata *CoreData) {
+    e.Encode(cdata.currentTerm)
+	  e.Encode(cdata.votedFor)
+    e.Encode(cdata.log)
+  })
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
 }
@@ -99,9 +110,11 @@ func (rf *Raft) readPersist(data []byte) {
       d.Decode(&log) != nil {
    fmt.Println("Failed to restore the persisted data.")
   } else {
-    rf.currentTerm = currentTerm
-    rf.votedFor = votedFor
-    rf.log = rf.log
+    rf.af.WithLock(func(st int, cdata *CoreData) {
+      cdata.currentTerm = currentTerm
+      cdata.votedFor = votedFor
+      cdata.log = log
+    })
   }
 }
 
@@ -120,25 +133,28 @@ func decodeReply(data Bytes) (reply RequestReply) {
 }
 
 // Returns true if 'currentTerm' got updated to peerTerm
-// No lock should be held by the caller
 func (rf *Raft) updateTerm(peerTerm int) bool {
-  rf.Lock()
-  defer rf.Unlock()
-  if rf.currentTerm < peerTerm {
-    rf.currentTerm = peerTerm
-    rf.votedFor = -1
-    rf.af.Transit(Follower)
-    return true
-  }
-  return false
+  return rf.updateTermAndTrans(peerTerm, true)
+}
+func (rf *Raft) updateTermAndTrans(peerTerm int, transit bool) bool {
+  updated := false
+  rf.af.WithRlock(func(st int, cdata *CoreData) {
+    if cdata.currentTerm < peerTerm {
+      cdata.currentTerm = peerTerm
+      cdata.votedFor = -1
+      updated = true
+      if transit {
+        rf.af.Transit(Follower)
+      }
+    }
+  })
+  return updated
 }
 
 // RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestReply) {
   termUpdated := rf.updateTerm(args.Term)
 
-  rf.Lock()
-  defer rf.Unlock()
   defer func() {
     if !termUpdated && reply.Success {
       // Reset election timer
@@ -146,22 +162,24 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestReply) {
     }
   }()
 
-  reply.Term = rf.currentTerm
-  reply.Peer = rf.me
-  reply.Success = false
-  if args.Term < rf.currentTerm ||
-      (rf.votedFor >=0 && rf.votedFor != args.CandidateId) {
-    return
-  }
-  lastTerm, lastIndex := rf.log[len(rf.log) - 1].Term, len(rf.log) - 1
-  if lastTerm > args.LastLogTerm ||
-      (lastTerm == args.LastLogTerm && lastIndex > args.LastLogIndex) {
-    return
-  }
-  reply.Success = true
-  // Can the following steps be done asynchronously (after returning the RPC)?
-  rf.votedFor = args.CandidateId
-  rf.Log("Voted for %d during term %d", rf.votedFor, rf.currentTerm)
+  rf.af.WithLock(func(st int, cdata *CoreData) {
+    reply.Term = cdata.currentTerm
+    reply.Peer = rf.me
+    reply.Success = false
+    if args.Term < cdata.currentTerm ||
+        (cdata.votedFor >=0 && cdata.votedFor != args.CandidateId) {
+      return
+    }
+    lastTerm, lastIndex := cdata.log[len(cdata.log) - 1].Term, len(cdata.log) - 1
+    if lastTerm > args.LastLogTerm ||
+        (lastTerm == args.LastLogTerm && lastIndex > args.LastLogIndex) {
+      return
+    }
+    reply.Success = true
+    // Can the following steps be done asynchronously (after returning the RPC)?
+    cdata.votedFor = args.CandidateId
+    rf.Log("Voted for %d during term %d", cdata.votedFor, cdata.currentTerm)
+  })
 }
 
 //
@@ -202,21 +220,25 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *RequestReply) {
   termUpdated := rf.updateTerm(args.Term)
 
-  rf.Lock()
-  defer rf.Unlock()
   defer func() {
     if rf.commitIndex > rf.lastApplied {
       rf.applierWakeup<-true
     }
   }()
 
-  reply.Term = rf.currentTerm
+  curTermSnapshot := 0
+  rf.af.WithRlock(func(st int, cdata *CoreData) {
+    curTermSnapshot = cdata.currentTerm
+  })
+
+  reply.Term = curTermSnapshot
   reply.Peer = rf.me
   reply.Success = false
-  if args.Term < rf.currentTerm {
+  if args.Term < curTermSnapshot {
     // out-of-date leader
     return
   }
+  // A heartbeat must go through all the following steps as well
   rf.leader = args.LeaderId
   defer func() {
     if !termUpdated {
@@ -225,27 +247,26 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *RequestReply) {
     }
   }()
 
-  if args.PrevLogIndex >= len(rf.log) ||
-     args.PrevLogTerm != rf.log[args.PrevLogIndex].Term {
-    return
-  }
-  matchedLen := 0
-  for matchedLen < len(args.Entries) &&
-      args.PrevLogIndex + matchedLen + 1 < len(rf.log) &&
-      rf.log[args.PrevLogIndex + matchedLen + 1].Term == args.Entries[matchedLen].Term {
-    matchedLen++
-  }
-  rf.log = rf.log[:args.PrevLogIndex + matchedLen + 1]
-  for ;matchedLen < len(args.Entries); matchedLen++ {
-    rf.log = append(rf.log, args.Entries[matchedLen])
-  }
-  reply.Success = true
-  if args.LeaderCommit > rf.commitIndex {
-    rf.commitIndex = args.LeaderCommit
-    if rf.commitIndex > len(rf.log) - 1 {
-      rf.commitIndex = len(rf.log) - 1
+  rf.af.WithLock(func(st int, cdata *CoreData) {
+    if args.PrevLogIndex >= len(cdata.log) ||
+       args.PrevLogTerm != cdata.log[args.PrevLogIndex].Term {
+      return
     }
-  }
+    matchedLen := 0
+    for matchedLen < len(args.Entries) &&
+        args.PrevLogIndex + matchedLen + 1 < len(cdata.log) &&
+        cdata.log[args.PrevLogIndex + matchedLen + 1].Term == args.Entries[matchedLen].Term {
+      matchedLen++
+    }
+    cdata.log = cdata.log[:args.PrevLogIndex + matchedLen + 1]
+    for ;matchedLen < len(args.Entries); matchedLen++ {
+      cdata.log = append(cdata.log, args.Entries[matchedLen])
+    }
+    reply.Success = true
+    if args.LeaderCommit > rf.commitIndex {
+      rf.commitIndex = min(args.LeaderCommit, len(cdata.log) - 1)
+    }
+  })
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *RequestReply) bool {
@@ -271,23 +292,22 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 	index = -1
 	term = -1
   isLeader = false
-  rf.Lock()
-  if rf.af.GetState() != Leader && rf.af.GetState() != PreLeader {
-    rf.Unlock()
-    return
-  }
-  isLeader = true
-  term = rf.currentTerm
-  index = len(rf.log)
-  entry := LogEntry{
-    Term: term,
-    Cmd: command,
-  }
-  rf.log = append(rf.log, entry)
-  rf.Unlock()
+  rf.af.WithLock(func(st int, cdata *CoreData) {
+    if st != Leader && st != PreLeader {
+      return
+    }
+    isLeader = true
+    term = cdata.currentTerm
+    index = len(cdata.log)
+    entry := LogEntry{
+      Term: term,
+      Cmd: command,
+    }
+    cdata.log = append(cdata.log, entry)
+    rf.Log("Appended entry %+v at %d.", entry, index)
+  })
 
-  rf.Log("Appended entry %+v at %d.", entry, index)
-  toCh := time.After(getHearbeatTimeout())
+  toCh := time.After(2 * getHearbeatTimeout())
   for {
     select {
       case <-toCh:
@@ -310,7 +330,6 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 //
 func (rf *Raft) Kill() {
   rf.Log("Killing the server")
-  rf.killed = true
   rf.applierWakeup<-false
   rf.Log("Stopping the AsyncFSA")
   rf.af.Stop()
@@ -334,17 +353,17 @@ func (rf *Raft)onFollower(af *AsyncFSA) int {
 
 func (rf *Raft) onCandidate(af *AsyncFSA) int {
   timeoutCh := time.After(getElectionTimeout())
-
-  rf.Lock()
-  rf.currentTerm++
-  rf.votedFor = rf.me
-  args := RequestVoteArgs{
-    Term: rf.currentTerm,
-    CandidateId: rf.me,
-    LastLogIndex: len(rf.log) - 1,
-    LastLogTerm: rf.log[len(rf.log) - 1].Term,
-  }
-  rf.Unlock()
+  var args RequestVoteArgs
+  af.WithLock(func(st int, cdata *CoreData) {
+    cdata.currentTerm++
+    cdata.votedFor = rf.me
+    args = RequestVoteArgs{
+      Term: cdata.currentTerm,
+      CandidateId: rf.me,
+      LastLogIndex: len(cdata.log) - 1,
+      LastLogTerm: cdata.log[len(cdata.log) - 1].Term,
+    }
+  })
 
   ch := make(Gchan, len(rf.peers))
   for p, _ := range rf.peers {
@@ -377,7 +396,7 @@ func (rf *Raft) onCandidate(af *AsyncFSA) int {
     if it != nil {
       reply := decodeReply(it)
       // rf.Log("Got RequestVote reply: %+v", reply)
-      if rf.updateTerm(reply.Term) {
+      if rf.updateTermAndTrans(reply.Term, false) {
         return Follower
       }
       if reply.Success {
@@ -390,15 +409,20 @@ func (rf *Raft) onCandidate(af *AsyncFSA) int {
 }
 
 func (rf *Raft)onPreLeader(af *AsyncFSA) int {
-  rf.Log("Became leader at term %d", rf.currentTerm)
+  rf.af.WithRlock(func(st int, cdata *CoreData) {
+    rf.Log("Became leader at term %d", cdata.currentTerm)
+  })
   rf.nextIndex = make([]int, len(rf.peers))
   rf.matchIndex = make([]int, len(rf.peers))
-  rf.Lock()
+  logLen := 0
+
+  rf.af.WithRlock(func(st int, cdata *CoreData) {
+    logLen = len(cdata.log)
+  })
   for i, _ := range rf.nextIndex {
-    rf.nextIndex[i] = len(rf.log)
+    rf.nextIndex[i] = logLen
     rf.matchIndex[i] = 0
   }
-  rf.Unlock()
   return Leader
 }
 
@@ -413,22 +437,26 @@ func (rf *Raft) replicateLogs(af *AsyncFSA) int {
   numRPCs := 0
   numReplies := 0
   defer func() {
-    rf.Log("Sent %d RPCs and got %d replies during one replicateLogs call at term %d.", numRPCs, numReplies, rf.currentTerm)
+    af.WithRlock(func(st int, cdata *CoreData) {
+      rf.Log("Sent %d RPCs and got %d replies during one replicateLogs call at term %d.", numRPCs, numReplies, cdata.currentTerm)
+    })
   }()
 
   sendOne := func (peer int) {
-    rf.Lock()
     numRPCs++
     // rf.Log("Peer %d nextIndex %d", peer, rf.nextIndex[peer])
     args := AppendEntriesArgs{
-      Term: rf.currentTerm,
       LeaderId: rf.me,
-      PrevLogIndex: rf.nextIndex[peer] - 1,
-      PrevLogTerm: rf.log[rf.nextIndex[peer] - 1].Term,
-      Entries: rf.log[rf.nextIndex[peer]:],
+      // Stale value also works
       LeaderCommit: rf.commitIndex,
+      PrevLogIndex: rf.nextIndex[peer] - 1,
     }
-    rf.Unlock()
+    af.WithRlock(func(st int, cdata *CoreData) {
+      args.Term = cdata.currentTerm
+      args.PrevLogTerm = cdata.log[rf.nextIndex[peer] - 1].Term
+      args.Entries = cdata.log[rf.nextIndex[peer]:]
+    })
+
     reply := RequestReply{}
     ok := rf.sendAppendEntries(peer, &args, &reply)
     if ok {
@@ -440,14 +468,17 @@ func (rf *Raft) replicateLogs(af *AsyncFSA) int {
   }
 
   updateMatchIndex := func(peer, appendedNewEntries int) {
-    rf.Lock()
-    defer rf.Unlock()
     rf.nextIndex[peer] += appendedNewEntries
     rf.matchIndex[peer] = rf.nextIndex[peer] - 1
     // rf.Log("matchIndex %+v", rf.matchIndex)
     // rf.Log("nextIndex %+v", rf.nextIndex)
     N := rf.matchIndex[peer]
-    if N > rf.commitIndex && rf.log[N].Term == rf.currentTerm {
+    inCurrentTern := false
+    rf.af.WithRlock(func(st int, cdata *CoreData) {
+      assert(N < len(cdata.log), "%d out of log bound %d", N, len(cdata.log))
+      inCurrentTern = cdata.log[N].Term == cdata.currentTerm
+    })
+    if N > rf.commitIndex && inCurrentTern {
       numGoodPeers := 1
       for p, match := range rf.matchIndex {
         if p == rf.me {
@@ -486,7 +517,7 @@ func (rf *Raft) replicateLogs(af *AsyncFSA) int {
     }
     assert(replyBytes != nil, "Should have got a reply")
     reply := decodeReply(replyBytes)
-    if rf.updateTerm(reply.Term) {
+    if rf.updateTermAndTrans(reply.Term, false) {
       return Follower
     }
     if reply.Success {
@@ -495,10 +526,8 @@ func (rf *Raft) replicateLogs(af *AsyncFSA) int {
       }
       numReplies++
     } else {
-      rf.Lock()
       rf.nextIndex[reply.Peer]--
       assert(rf.nextIndex[reply.Peer] > 0, "next index shouldn't reach 0")
-      rf.Unlock()
       go sendOne(reply.Peer)
     }
   }
@@ -525,39 +554,21 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
   rf.applyCh = applyCh
 
-  rf.currentTerm = 1
-  rf.votedFor = -1
-  // The first entry is a sentinel
-  rf.log = make([]LogEntry, 1)
-
   rf.leader = -1
-
   rf.commitIndex = 0
   rf.lastApplied = 0
 
   rf.applierWakeup = make(WakeupChan, 10)
   rf.appliedLogIndex = make(chan int, 100)
-  go func() {
-    for {
-      if live := <-rf.applierWakeup; !live {
-        break
-      }
-      for rf.lastApplied < rf.commitIndex {
-        msg := ApplyMsg{
-          CommandValid: true,
-          Command: rf.log[rf.lastApplied + 1].Cmd,
-          CommandIndex: rf.lastApplied + 1,
-        }
-        rf.Log("Applied %+v at term %d", msg, rf.log[rf.lastApplied+1].Term)
-        rf.applyCh<-msg
-        // No other threads touch 'lastApplied'
-        rf.lastApplied++
-        rf.appliedLogIndex<-rf.lastApplied
-      }
-    }
-  }()
 
-  rf.af = MakeAsyncFSA(Follower)
+  cdata := CoreData {
+    currentTerm: 1,
+    votedFor: -1,
+    // The first entry is a sentinel.
+    log: make([]LogEntry, 1),
+  }
+
+  rf.af = MakeAsyncFSA(Follower, cdata)
   rf.af.AddCallback(Follower, rf.onFollower).AddCallback(
     Candidate, rf.onCandidate).AddCallback(
     PreLeader, rf.onPreLeader).AddCallback(
@@ -567,5 +578,30 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
   // rand.Seed(int64(time.Now().Nanosecond()))
   rand.Seed(int64(1234567))
+
+  go func() {
+    for {
+      if live := <-rf.applierWakeup; !live {
+        rf.Log("Applier is exiting.")
+        break
+      }
+      for rf.lastApplied < rf.commitIndex {
+        msg := ApplyMsg{
+          CommandValid: true,
+          CommandIndex: rf.lastApplied + 1,
+        }
+        term := 0
+        rf.af.WithRlock(func(st int, cdata *CoreData) {
+          msg.Command = cdata.log[rf.lastApplied + 1].Cmd
+          term = cdata.log[rf.lastApplied + 1].Term
+        })
+        rf.Log("Applied %+v at term %d", msg, term)
+        rf.applyCh<-msg
+        // No other threads touch 'lastApplied'
+        rf.lastApplied++
+        rf.appliedLogIndex<-rf.lastApplied
+      }
+    }
+  }()
 	return rf
 }

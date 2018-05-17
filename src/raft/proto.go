@@ -1,7 +1,7 @@
 package raft
 
 import "labrpc"
-import "sync"
+// import "sync"
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -30,6 +30,14 @@ type LogEntry struct {
 // true: wait up and continue work
 type WakeupChan chan bool
 
+type CoreData struct {
+  // For all servers
+  currentTerm int
+  votedFor int
+  // The first entry is a sentinel
+  log []LogEntry
+}
+
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
@@ -39,14 +47,8 @@ type Raft struct {
 	me        int                 // this peer's index into peers[]
   applyCh chan ApplyMsg
 
-  sync.Mutex
-  // For all servers
-  currentTerm int
-  votedFor int
-  // The first entry is a sentinel
-  log []LogEntry
+  // Data members which don't need sync
   leader int
-
   commitIndex int
   lastApplied int
 
@@ -54,14 +56,11 @@ type Raft struct {
   nextIndex []int
   matchIndex []int
 
-  // --- The members above are protectd by the 'Mutex'
   af *AsyncFSA
 
   applierWakeup WakeupChan
 
   appliedLogIndex chan int
-
-  killed bool
 }
 
 // example RequestVote RPC arguments structure.

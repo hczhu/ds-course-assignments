@@ -59,6 +59,8 @@ type Raft struct {
 
   applierWakeup WakeupChan
 
+  appliedLogIndex chan int
+
   killed bool
 }
 
@@ -83,8 +85,8 @@ type RequestReply struct {
   Success bool
   // Which server is this reply from?
   Peer int
-  // How many entries of the leader at the moment the request was sent?
-  NumLeaderLogEntries int
+  // How many new entries the follower just appended?
+  AppendedNewEntries int
 }
 
 type AppendEntriesArgs struct {

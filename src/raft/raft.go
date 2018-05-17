@@ -230,7 +230,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *RequestReply) {
       rf.log[args.PrevLogIndex + matchedLen + 1].Term == args.Entries[matchedLen].Term {
     matchedLen++
   }
-  rf.log = rf.log[:args.PrevLogTerm + matchedLen + 1]
+  rf.log = rf.log[:args.PrevLogIndex + matchedLen + 1]
   for ;matchedLen < len(args.Entries); matchedLen++ {
     rf.log = append(rf.log, args.Entries[matchedLen])
   }
@@ -262,15 +262,32 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Re
 // term. the third return value is true if this server believes it is
 // the leader.
 //
-func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-
-	// Your code here (2B).
-
-
-	return index, term, isLeader
+func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) {
+	index = -1
+	term = -1
+  _, isLeader = rf.GetState()
+  if !isLeader {
+    return
+  }
+  rf.Lock()
+  term = rf.currentTerm
+  index = len(rf.log)
+  entry := LogEntry{
+    Term: term,
+    Cmd: command,
+  }
+  rf.log = append(rf.log, entry)
+  rf.Unlock()
+  toCh := time.After(getHearbeatTimeout())
+  select {
+    case <-toCh:
+      return
+    case logIndex := <-rf.appliedLogIndex:
+      if logIndex >= index {
+        break
+      }
+  }
+	return
 }
 
 //
@@ -358,12 +375,30 @@ func (rf *Raft) onCandidate(af *AsyncFSA) int {
   return PreLeader
 }
 
+func (rf *Raft)onPreLeader(af *AsyncFSA) int {
+  rf.Log("Became leader at term %d", rf.currentTerm)
+  rf.nextIndex = make([]int, len(rf.peers))
+  rf.matchIndex = make([]int, len(rf.peers))
+  rf.Lock()
+  for i, _ := range rf.nextIndex {
+    rf.nextIndex[i] = len(rf.log)
+    rf.matchIndex[i] = 0
+  }
+  rf.Unlock()
+  return Leader
+}
+
+func (rf *Raft)onLeader(af *AsyncFSA) int {
+  return rf.replicateLogs(af)
+}
+
 func (rf *Raft) replicateLogs(af *AsyncFSA) int {
   toCh := time.After(getHearbeatTimeout())
-  gchan := make(Gchan, len(rf.peers))
+  replyChan := make(Gchan, len(rf.peers))
 
   sendOne := func (peer int) {
     rf.Lock()
+    // rf.Log("Peer %d nextIndex %d", peer, rf.nextIndex[peer])
     args := AppendEntriesArgs{
       Term: rf.currentTerm,
       LeaderId: rf.me,
@@ -377,21 +412,26 @@ func (rf *Raft) replicateLogs(af *AsyncFSA) int {
     ok := rf.sendAppendEntries(peer, &args, &reply)
     if ok {
       reply.Peer = peer
-      // Have to keep this number because 'rf.log' may change later
-      reply.NumLeaderLogEntries = args.PrevLogIndex + 1 + len(args.Entries)
-      gchan <- encodeReply(reply)
+      reply.AppendedNewEntries = len(args.Entries)
+      rf.Log("AppendEntries request %+v got reply %+v", args, reply)
+      replyChan <- encodeReply(reply)
     }
   }
 
-  updateMatchIndex := func(peer, numLeaderLogEntries int) {
+  updateMatchIndex := func(peer, appendedNewEntries int) {
     rf.Lock()
     defer rf.Unlock()
-    rf.nextIndex[peer] = numLeaderLogEntries
-    rf.matchIndex[peer] = numLeaderLogEntries - 1
+    rf.nextIndex[peer] += appendedNewEntries
+    rf.matchIndex[peer] = rf.nextIndex[peer] - 1
+    // rf.Log("matchIndex %+v", rf.matchIndex)
+    // rf.Log("nextIndex %+v", rf.nextIndex)
     N := rf.matchIndex[peer]
     if N > rf.commitIndex && rf.log[N].Term == rf.currentTerm {
-      numGoodPeers := 0
-      for _, match := range rf.matchIndex {
+      numGoodPeers := 1
+      for p, match := range rf.matchIndex {
+        if p == rf.me {
+          continue
+        }
         if match >= N {
           numGoodPeers++
           if 2 * numGoodPeers > len(rf.peers) {
@@ -406,7 +446,6 @@ func (rf *Raft) replicateLogs(af *AsyncFSA) int {
     }
   }
 
-  replyChan := make(Gchan, len(rf.peers))
   for p, _ := range rf.peers {
     if p == rf.me {
       continue
@@ -430,33 +469,18 @@ func (rf *Raft) replicateLogs(af *AsyncFSA) int {
       return Follower
     }
     if reply.Success {
-      updateMatchIndex(reply.Peer, reply.NumLeaderLogEntries)
+      if reply.AppendedNewEntries > 0 {
+        updateMatchIndex(reply.Peer, reply.AppendedNewEntries)
+      }
     } else {
       rf.Lock()
       rf.nextIndex[reply.Peer]--
-      rf.Unlock()
       assert(rf.nextIndex[reply.Peer] > 0, "next index shouldn't reach 0")
+      rf.Unlock()
       go sendOne(reply.Peer)
     }
   }
   return Leader
-}
-
-func (rf *Raft)onPreLeader(af *AsyncFSA) int {
-  rf.Log("Became leader at term %d", rf.currentTerm)
-  rf.nextIndex = make([]int, len(rf.peers))
-  rf.matchIndex = make([]int, len(rf.peers))
-  rf.Lock()
-  for i, _ := range rf.nextIndex {
-    rf.nextIndex[i] = len(rf.log)
-    rf.matchIndex[i] = 0
-  }
-  rf.Unlock()
-  return Leader
-}
-
-func (rf *Raft)onLeader(af *AsyncFSA) int {
-  return rf.replicateLogs(af)
 }
 
 //
@@ -490,6 +514,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
   rf.lastApplied = 0
 
   rf.applierWakeup = make(WakeupChan, 10)
+  rf.appliedLogIndex = make(chan int, 100)
   go func() {
     for {
       if live := <-rf.applierWakeup; !live {
@@ -507,6 +532,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
         rf.applyCh<-msg
         // No other threads touch 'lastApplied'
         rf.lastApplied++
+        rf.appliedLogIndex<-rf.lastApplied
       }
     }
   }()

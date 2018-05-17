@@ -472,6 +472,7 @@ func (cfg *config) one(cmd int, expectedServers int, retry bool) int {
 		}
     fmt.Println("One round in one()")
 	}
+  fmt.Println("Failed one()")
 	panic(fmt.Sprintf("one(%v) failed to reach agreement", cmd))
 	cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 	return -1

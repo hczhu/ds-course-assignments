@@ -306,7 +306,7 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
     cdata.log = append(cdata.log, entry)
     rf.Log("Appended entry %+v at %d.", entry, index)
   })
-
+  return
   if isLeader {
     toCh := time.After(2 * getHearbeatTimeout())
     for {
@@ -332,9 +332,9 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 //
 func (rf *Raft) Kill() {
   rf.Log("Killing the server")
-  rf.applierWakeup<-false
   rf.Log("Stopping the AsyncFSA")
   rf.af.Stop()
+  rf.applierWakeup<-false
 }
 
 func getElectionTimeout() time.Duration {
@@ -446,7 +446,7 @@ func (rf *Raft) replicateLogs(af *AsyncFSA) int {
 
   sendOne := func (peer int) {
     numRPCs++
-    // rf.Log("Peer %d nextIndex %d", peer, rf.nextIndex[peer])
+    rf.Log("Peer %d nextIndex %d", peer, rf.nextIndex[peer])
     args := AppendEntriesArgs{
       LeaderId: rf.me,
       // Stale value also works
@@ -464,7 +464,7 @@ func (rf *Raft) replicateLogs(af *AsyncFSA) int {
     if ok {
       reply.Peer = peer
       reply.AppendedNewEntries = len(args.Entries)
-      // rf.Log("AppendEntries request %+v got reply %+v", args, reply)
+      rf.Log("AppendEntries request %+v got reply %+v", args, reply)
       replyChan <- encodeReply(reply)
     }
   }
@@ -472,8 +472,8 @@ func (rf *Raft) replicateLogs(af *AsyncFSA) int {
   updateMatchIndex := func(peer, appendedNewEntries int) {
     rf.nextIndex[peer] += appendedNewEntries
     rf.matchIndex[peer] = rf.nextIndex[peer] - 1
-    // rf.Log("matchIndex %+v", rf.matchIndex)
-    // rf.Log("nextIndex %+v", rf.nextIndex)
+    rf.Log("matchIndex %+v", rf.matchIndex)
+    rf.Log("nextIndex %+v", rf.nextIndex)
     N := rf.matchIndex[peer]
     inCurrentTern := false
     rf.af.WithRlock(func(st int, cdata *CoreData) {
@@ -522,11 +522,11 @@ func (rf *Raft) replicateLogs(af *AsyncFSA) int {
     if rf.updateTermAndTrans(reply.Term, false) {
       return Follower
     }
+    numReplies++
     if reply.Success {
       if reply.AppendedNewEntries > 0 {
         updateMatchIndex(reply.Peer, reply.AppendedNewEntries)
       }
-      numReplies++
     } else {
       rf.nextIndex[reply.Peer]--
       assert(rf.nextIndex[reply.Peer] > 0, "next index shouldn't reach 0")
@@ -561,7 +561,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
   rf.lastApplied = 0
 
   rf.applierWakeup = make(WakeupChan, 10)
-  rf.appliedLogIndex = make(chan int, 100)
+  rf.appliedLogIndex = make(chan int, 10)
 
   cdata := CoreData {
     currentTerm: 1,
@@ -584,7 +584,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
   go func() {
     for {
       if live := <-rf.applierWakeup; !live {
-        rf.Log("Applier is exiting.")
         break
       }
       for rf.lastApplied < rf.commitIndex {
@@ -598,12 +597,19 @@ func Make(peers []*labrpc.ClientEnd, me int,
           term = cdata.log[rf.lastApplied + 1].Term
         })
         rf.Log("Applied %+v at term %d", msg, term)
-        rf.applyCh<-msg
-        // No other threads touch 'lastApplied'
-        rf.lastApplied++
-        rf.appliedLogIndex<-rf.lastApplied
+        select {
+          case rf.applyCh<-msg:
+            // No other threads touch 'lastApplied'
+            rf.lastApplied++
+            rf.appliedLogIndex<-rf.lastApplied
+          case live := <-rf.applierWakeup:
+            if !live {
+              break
+            }
+        }
       }
     }
+    rf.Log("Applier is exiting.")
   }()
 	return rf
 }

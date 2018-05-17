@@ -601,7 +601,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
           case rf.applyCh<-msg:
             // No other threads touch 'lastApplied'
             rf.lastApplied++
-            rf.appliedLogIndex<-rf.lastApplied
           case live := <-rf.applierWakeup:
             if !live {
               break

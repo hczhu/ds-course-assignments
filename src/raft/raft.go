@@ -307,16 +307,18 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
     rf.Log("Appended entry %+v at %d.", entry, index)
   })
 
-  toCh := time.After(2 * getHearbeatTimeout())
-  for {
-    select {
-      case <-toCh:
-        rf.Log("Agreement timeouts")
-        return
-      case logIndex := <-rf.appliedLogIndex:
-        if logIndex >= index {
+  if isLeader {
+    toCh := time.After(2 * getHearbeatTimeout())
+    for {
+      select {
+        case <-toCh:
+          rf.Log("Agreement timeouts")
           return
-        }
+        case logIndex := <-rf.appliedLogIndex:
+          if logIndex >= index {
+            return
+          }
+      }
     }
   }
 	return
@@ -576,8 +578,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-  // rand.Seed(int64(time.Now().Nanosecond()))
-  rand.Seed(int64(1234567))
+  rand.Seed(int64(time.Now().Nanosecond()))
+  // rand.Seed(int64(1234567))
 
   go func() {
     for {

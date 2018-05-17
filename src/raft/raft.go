@@ -41,6 +41,8 @@ const (
 
 var gStartTime time.Time = time.Now()
 
+var gPrintLog bool = true
+
 func assert(cond bool, format string, v ...interface {}) {
   if !cond {
     panic(fmt.Sprintf(format, v...))
@@ -48,6 +50,9 @@ func assert(cond bool, format string, v ...interface {}) {
 }
 
 func (rf *Raft) Log(format string, v ...interface {}) {
+  if !gPrintLog {
+    return
+  }
   fmt.Println(
     fmt.Sprintf("Peer #%d @%07d:", rf.me, int64(time.Since(gStartTime) / time.Millisecond)),
     fmt.Sprintf(format, v...))
@@ -265,11 +270,13 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Re
 func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) {
 	index = -1
 	term = -1
-  _, isLeader = rf.GetState()
-  if !isLeader {
+  isLeader = false
+  rf.Lock()
+  if rf.af.GetState() != Leader && rf.af.GetState() != PreLeader {
+    rf.Unlock()
     return
   }
-  rf.Lock()
+  isLeader = true
   term = rf.currentTerm
   index = len(rf.log)
   entry := LogEntry{
@@ -278,14 +285,18 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
   }
   rf.log = append(rf.log, entry)
   rf.Unlock()
+
+  rf.Log("Appended entry %+v at %d.", entry, index)
   toCh := time.After(getHearbeatTimeout())
-  select {
-    case <-toCh:
-      return
-    case logIndex := <-rf.appliedLogIndex:
-      if logIndex >= index {
-        break
-      }
+  for {
+    select {
+      case <-toCh:
+        return
+      case logIndex := <-rf.appliedLogIndex:
+        if logIndex >= index {
+          return
+        }
+    }
   }
 	return
 }
@@ -297,8 +308,10 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 // turn off debug output from this instance.
 //
 func (rf *Raft) Kill() {
+  rf.Log("Killing the server")
   rf.killed = true
   rf.applierWakeup<-false
+  rf.Log("Stopping the AsyncFSA")
   rf.af.Stop()
 }
 
@@ -396,8 +409,15 @@ func (rf *Raft) replicateLogs(af *AsyncFSA) int {
   toCh := time.After(getHearbeatTimeout())
   replyChan := make(Gchan, len(rf.peers))
 
+  numRPCs := 0
+  numReplies := 0
+  defer func() {
+    rf.Log("Sent %d RPCs and got %d replies during one replicateLogs call at term %d.", numRPCs, numReplies, rf.currentTerm)
+  }()
+
   sendOne := func (peer int) {
     rf.Lock()
+    numRPCs++
     // rf.Log("Peer %d nextIndex %d", peer, rf.nextIndex[peer])
     args := AppendEntriesArgs{
       Term: rf.currentTerm,
@@ -413,7 +433,7 @@ func (rf *Raft) replicateLogs(af *AsyncFSA) int {
     if ok {
       reply.Peer = peer
       reply.AppendedNewEntries = len(args.Entries)
-      rf.Log("AppendEntries request %+v got reply %+v", args, reply)
+      // rf.Log("AppendEntries request %+v got reply %+v", args, reply)
       replyChan <- encodeReply(reply)
     }
   }
@@ -472,6 +492,7 @@ func (rf *Raft) replicateLogs(af *AsyncFSA) int {
       if reply.AppendedNewEntries > 0 {
         updateMatchIndex(reply.Peer, reply.AppendedNewEntries)
       }
+      numReplies++
     } else {
       rf.Lock()
       rf.nextIndex[reply.Peer]--
@@ -521,14 +542,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
         break
       }
       for rf.lastApplied < rf.commitIndex {
-        rf.Lock()
         msg := ApplyMsg{
           CommandValid: true,
           Command: rf.log[rf.lastApplied + 1].Cmd,
           CommandIndex: rf.lastApplied + 1,
         }
-        rf.Unlock()
-        rf.Log("Applied %+v", msg)
+        rf.Log("Applied %+v at term %d", msg, rf.log[rf.lastApplied+1].Term)
         rf.applyCh<-msg
         // No other threads touch 'lastApplied'
         rf.lastApplied++
@@ -545,6 +564,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-  rand.Seed(int64(time.Now().Nanosecond()))
+  // rand.Seed(int64(time.Now().Nanosecond()))
+  rand.Seed(int64(1234567))
 	return rf
 }

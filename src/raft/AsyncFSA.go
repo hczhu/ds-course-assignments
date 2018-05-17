@@ -88,9 +88,9 @@ func (af *AsyncFSA)Start() {
       }
       nextSt := callback(af)
       af.setState(nextSt)
-      // if nextSt != st {
+      if nextSt != st {
         af.logger("AsyncFSA transited to state: %d", nextSt)
-      // }
+      }
     }
     af.wg.Done()
   }()

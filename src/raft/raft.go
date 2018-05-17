@@ -446,7 +446,7 @@ func (rf *Raft) replicateLogs(af *AsyncFSA) int {
 
   sendOne := func (peer int) {
     numRPCs++
-    rf.Log("Peer %d nextIndex %d", peer, rf.nextIndex[peer])
+    // rf.Log("Peer %d nextIndex %d", peer, rf.nextIndex[peer])
     args := AppendEntriesArgs{
       LeaderId: rf.me,
       // Stale value also works
@@ -464,7 +464,7 @@ func (rf *Raft) replicateLogs(af *AsyncFSA) int {
     if ok {
       reply.Peer = peer
       reply.AppendedNewEntries = len(args.Entries)
-      rf.Log("AppendEntries request %+v got reply %+v", args, reply)
+      // rf.Log("AppendEntries request %+v got reply %+v", args, reply)
       replyChan <- encodeReply(reply)
     }
   }
@@ -472,8 +472,8 @@ func (rf *Raft) replicateLogs(af *AsyncFSA) int {
   updateMatchIndex := func(peer, appendedNewEntries int) {
     rf.nextIndex[peer] += appendedNewEntries
     rf.matchIndex[peer] = rf.nextIndex[peer] - 1
-    rf.Log("matchIndex %+v", rf.matchIndex)
-    rf.Log("nextIndex %+v", rf.nextIndex)
+    // rf.Log("matchIndex %+v", rf.matchIndex)
+    // rf.Log("nextIndex %+v", rf.nextIndex)
     N := rf.matchIndex[peer]
     inCurrentTern := false
     rf.af.WithRlock(func(st int, cdata *CoreData) {

@@ -222,11 +222,9 @@ func (cfg *config) checkTimeout() {
 }
 
 func (cfg *config) cleanup() {
-  fmt.Println("Cleaning up...")
 	for i := 0; i < len(cfg.rafts); i++ {
 		if cfg.rafts[i] != nil {
 			cfg.rafts[i].Kill()
-      fmt.Println("Killed peer", i)
 		}
 	}
 	cfg.net.Cleanup()
@@ -325,7 +323,7 @@ func (cfg *config) checkOneLeader() int {
 			return leaders[lastTermWithLeader][0]
 		}
 	}
-	panic("expected one leader, got none")
+	cfg.t.Fatalf("expected one leader, got none")
 	return -1
 }
 
@@ -464,16 +462,12 @@ func (cfg *config) one(cmd int, expectedServers int, retry bool) int {
 				time.Sleep(20 * time.Millisecond)
 			}
 			if retry == false {
-				panic(fmt.Sprintf("one(%v) failed to reach agreement", cmd))
 				cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 			}
 		} else {
 			time.Sleep(50 * time.Millisecond)
 		}
-    fmt.Println("One round in one()")
 	}
-  fmt.Println("Failed one()")
-	panic(fmt.Sprintf("one(%v) failed to reach agreement", cmd))
 	cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 	return -1
 }

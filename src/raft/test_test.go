@@ -41,9 +41,6 @@ func TestInitialElection2A(t *testing.T) {
 		fmt.Printf("warning: term changed even though there were no failures")
 	}
 
-	// there should still be a leader.
-	cfg.checkOneLeader()
-
 	cfg.end()
 }
 
@@ -58,7 +55,6 @@ func TestReElection2A(t *testing.T) {
 
 	// if the leader disconnects, a new one should be elected.
 	cfg.disconnect(leader1)
-  fmt.Println("Disconnected", leader1)
 	cfg.checkOneLeader()
 
 	// if the old leader rejoins, that shouldn't
@@ -335,24 +331,18 @@ func TestBackup2B(t *testing.T) {
 
 	cfg.begin("Test (2B): leader backs up quickly over incorrect follower logs")
 
-  cmd := 0
-	cfg.one(cmd, servers, true)
-  cmd++
+	cfg.one(rand.Int(), servers, true)
 
 	// put leader and one follower in a partition
 	leader1 := cfg.checkOneLeader()
-  fmt.Println("leader1 =", leader1)
 	cfg.disconnect((leader1 + 2) % servers)
 	cfg.disconnect((leader1 + 3) % servers)
 	cfg.disconnect((leader1 + 4) % servers)
 
 	// submit lots of commands that won't commit
 	for i := 0; i < 50; i++ {
-		cfg.rafts[leader1].Start(cmd)
-    cmd++
+		cfg.rafts[leader1].Start(rand.Int())
 	}
-
-  fmt.Println("Finished 50 bad ones")
 
 	time.Sleep(RaftElectionTimeout / 2)
 
@@ -366,14 +356,11 @@ func TestBackup2B(t *testing.T) {
 
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
-		cfg.one(cmd, 3, true)
-    cmd++
+		cfg.one(rand.Int(), 3, true)
 	}
-  fmt.Println("Finished 50 good ones")
 
 	// now another partitioned leader and one follower
 	leader2 := cfg.checkOneLeader()
-  fmt.Println("leader2 =", leader2)
 	other := (leader1 + 2) % servers
 	if leader2 == other {
 		other = (leader2 + 1) % servers
@@ -382,10 +369,8 @@ func TestBackup2B(t *testing.T) {
 
 	// lots more commands that won't commit
 	for i := 0; i < 50; i++ {
-		cfg.rafts[leader2].Start(cmd)
-    cmd++
+		cfg.rafts[leader2].Start(rand.Int())
 	}
-  fmt.Println("Finished 50 bad ones")
 
 	time.Sleep(RaftElectionTimeout / 2)
 
@@ -399,21 +384,16 @@ func TestBackup2B(t *testing.T) {
 
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
-		cfg.one(cmd, 3, true)
-    cmd++
+		cfg.one(rand.Int(), 3, true)
 	}
-  fmt.Println("Finished 50 good ones")
 
 	// now everyone
 	for i := 0; i < servers; i++ {
 		cfg.connect(i)
 	}
-  fmt.Println("Last cfg.one()")
-	cfg.one(cmd, servers, true)
+	cfg.one(rand.Int(), servers, true)
 
-  fmt.Println("Ending")
 	cfg.end()
-  fmt.Println("Ended")
 }
 
 func TestCount2B(t *testing.T) {
@@ -456,7 +436,6 @@ loop:
 			// leader moved on really quickly
 			continue
 		}
-    fmt.Printf("Leader %d term %d\n", leader, term)
 		cmds := []int{}
 		for i := 1; i < iters+2; i++ {
 			x := int(rand.Int31())

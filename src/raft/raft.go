@@ -13,7 +13,7 @@ import "math/rand"
 
 
 const (
-  HeartbeatMil = 450
+  HeartbeatMil = 100
   ElectionTimeoutMil = 700
   ElectionTimeoutDvMil = 300
   Follower = 0
@@ -434,7 +434,7 @@ func (rf *Raft) replicateLogs() {
   }()
   var sendRecursively func(peer int)
   sendRecursively = func (peer int) {
-    // rf.Log("Peer %d nextIndex %d", peer, rf.nextIndex[peer])
+    rf.Log("Send Peer %d nextIndex %d", peer, rf.nextIndex[peer])
     args := AppendEntriesArgs{
       LeaderId: rf.me,
       // Stale value also works
@@ -474,8 +474,8 @@ func (rf *Raft) replicateLogs() {
 
   updateMatchIndex := func(reply RequestReply) bool {
     peer := reply.Peer
-    newValue := reply.NextIndex + reply.AppendedNewEntries
-    if newValue <= rf.nextIndex[peer] {
+    newMatchIndex := reply.NextIndex + reply.AppendedNewEntries - 1
+    if newMatchIndex <= rf.matchIndex[peer] {
       rf.Log("Got a stale reply: %+v", reply)
       return true
     }
@@ -486,8 +486,8 @@ func (rf *Raft) replicateLogs() {
     if cdata.role != Leader {
       return false
     }
-    rf.nextIndex[peer] = newValue
-    rf.matchIndex[peer] = rf.nextIndex[peer] - 1
+    rf.matchIndex[peer] = newMatchIndex
+    rf.nextIndex[peer] = newMatchIndex + 1
     N := rf.matchIndex[peer]
     if N > rf.commitIndex && cdata.log[N].Term == cdata.currentTerm {
       numGoodPeers := 1

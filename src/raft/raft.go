@@ -13,9 +13,9 @@ import "math/rand"
 
 
 const (
-  HeartbeatMil = 100
-  ElectionTimeoutMil = 700
-  ElectionTimeoutDvMil = 300
+  HeartbeatMil = 50
+  ElectionTimeoutMil = 300
+  ElectionTimeoutDvMil = 100
   Follower = 0
   Candidate = 1
   Leader = 2

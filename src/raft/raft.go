@@ -13,8 +13,8 @@ import "math/rand"
 
 
 const (
-  HeartbeatMil = 350
-  ElectionTimeoutMil = 400
+  HeartbeatMil = 550
+  ElectionTimeoutMil = 600
   ElectionTimeoutDvMil = 400
   Follower = 0
   Candidate = 1
@@ -27,7 +27,7 @@ type Bytes []byte
 
 var gStartTime time.Time = time.Now()
 
-var gPrintLog bool = false
+var gPrintLog bool = true
 var gPersist bool = true
 
 func min(a, b int) int {
@@ -503,28 +503,38 @@ func (rf *Raft) replicateLogs() {
   }
 
   skipConflictingEntries := func(peer, conflictingTerm, firstIndex int) bool {
-    next := &rf.nextIndex[peer]
-    defer rf.Log("Updated peer %d next index to %d", peer, *next)
+    next := rf.nextIndex[peer]
 
     rf.RLock()
-    defer rf.RUnlock()
+    defer func() {
+      rf.RUnlock()
+      if next != rf.nextIndex[peer] {
+        rf.Log("Updated peer %d next index from %d to %d",
+          peer, rf.nextIndex[peer], next)
+        rf.nextIndex[peer] = next
+      }
+    }()
+
     cdata := &rf.cdata
     if cdata.role != Leader {
+      rf.Log("Not the leader any more.")
       return false
     }
 
     if conflictingTerm < 0 {
       // The follower's log is shorter than the previou probe
-      *next = firstIndex
+      next = firstIndex
       return true
     }
 
-    for *next--; *next > firstIndex; *next-- {
-      if cdata.log[*next - 1].Term == conflictingTerm {
+    for next--; next > firstIndex; next-- {
+      if cdata.log[next - 1].Term == conflictingTerm {
         return true
       }
     }
-    for ;*next > 0 && cdata.log[*next - 1].Term == conflictingTerm; *next-- {}
+    for next > 0 && cdata.log[next - 1].Term == conflictingTerm {
+      next--
+    }
     return true
   }
 
@@ -544,6 +554,7 @@ func (rf *Raft) replicateLogs() {
     result := rf.MultiWaitCh(replyChan, toCh)
     switch {
       case result.timeout:
+        rf.Log("Timeout!")
         // Start over
         return
       case result.interrupted:
@@ -560,6 +571,7 @@ func (rf *Raft) replicateLogs() {
             return
           }
         } else {
+          rf.Log("Reacting to reply %+v", reply)
           if !skipConflictingEntries(reply.Peer, reply.ConflictingTerm, reply.FirstLogIndex) {
             return
           }

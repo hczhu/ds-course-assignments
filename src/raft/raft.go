@@ -1,22 +1,5 @@
 package raft
 
-//
-// this is an outline of the API that raft must expose to
-// the service (or tester). see comments below for
-// each of these functions for more details.
-//
-// rf = Make(...)
-//   create a new Raft server.
-// rf.Start(command interface{}) (index, term, isleader)
-//   start agreement on a new log entry
-// rf.GetState() (term, isLeader)
-//   ask a Raft for its current term, and whether it thinks it is leader
-// ApplyMsg
-//   each time a new entry is committed to the log, each Raft peer
-//   should send an ApplyMsg to the service (or tester)
-//   in the same server.
-//
-
 // import "sync"
 import "labrpc"
 import "fmt"
@@ -117,10 +100,11 @@ func (rf *Raft) readPersist(data []byte) {
    fmt.Println("Failed to restore the persisted data.")
   } else {
     rf.Lock()
+    defer rf.Unlock()
+    cdata := &rf.cdata
     cdata.currentTerm = currentTerm
     cdata.votedFor = votedFor
     cdata.log = log
-    rf.Unlock()
   }
 }
 
@@ -141,6 +125,7 @@ func decodeReply(data Bytes) (reply RequestReply) {
 func (rf *Raft) updateTerm(peerTerm int, notify bool) bool {
   updated := false
   rf.Lock()
+  cdata := &rf.cdata
   if cdata.currentTerm < peerTerm {
     cdata.role = Follower
     cdata.currentTerm = peerTerm
@@ -176,6 +161,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestReply) {
     return
   }
   // This server must be a follower
+  assert(cdata.role == Follower, "Should be a follower")
   lastTerm, lastIndex := cdata.log[len(cdata.log) - 1].Term, len(cdata.log) - 1
   if lastTerm > args.LastLogTerm ||
       (lastTerm == args.LastLogTerm && lastIndex > args.LastLogIndex) {
@@ -266,6 +252,7 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
   }
   cdata.log = append(cdata.log, entry)
   rf.Log("Appended entry %+v at %d.", entry, index)
+  return
 }
 
 //
@@ -276,10 +263,12 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 //
 func (rf *Raft) Kill() {
   rf.Log("Killing the server")
-  rf.live = false
-  rf.applierWakeup<-false
+  rf.Lock()
+  rf.cdata.role = -1
+  rf.Unlock()
   rf.applierWakeup<-false
   rf.notifyQ<-false
+  rf.wg.Wait()
 }
 
 func getElectionTimeout() time.Duration {
@@ -293,7 +282,7 @@ func getHearbeatTimeout() time.Duration {
 type WaitResult struct {
   timeout bool
   interrupted bool
-  RequestReply reply
+  reply RequestReply
 }
 
 func (rf *Raft)MultiWait(gchan Gchan, timeout time.Duration) WaitResult {
@@ -319,102 +308,93 @@ func (rf *Raft) MultiWaitCh(gchan Gchan, toCh <-chan time.Time) (result WaitResu
 }
 
 func (rf *Raft)onFollower() {
-  rf.Log("Became a follower")
-  for rf.live {
-    result := rf.MultiWait(nil, getElectionTimeout())
-      case result.timeout:
-        rf.Lock()
-        cdata := &rf.cdata
-        cdata.currentTerm++
-        cdata.role = Candidate
-        cdata.votedFor = rf.me
-        rf.Unlock()
-        return
-    }
+  // rf.Log("Became a follower")
+  result := rf.MultiWait(nil, getElectionTimeout())
+  switch {
+    case result.timeout:
+      rf.Lock()
+      cdata := &rf.cdata
+      cdata.currentTerm++
+      cdata.role = Candidate
+      cdata.votedFor = rf.me
+      rf.Unlock()
+    case result.interrupted:
   }
 }
 
-func (rf *Raft) onCandidate() int {
-  rf.Log("Became a candidate")
-  for rf.live {
-    timeoutCh := time.After(getElectionTimeout())
-    var args RequestVoteArgs
-    prepareCandidacy := func() {
-      rf.Lock()
-      defer rf.Unlock()
-      cdata := &rf.cdata
+func (rf *Raft) onCandidate() {
+  // rf.Log("Became a candidate at term %d", rf.cdata.currentTerm)
+  timeoutCh := time.After(getElectionTimeout())
+  var args RequestVoteArgs
+  prepareCandidacy := func() bool {
+    rf.Lock()
+    defer rf.Unlock()
+    cdata := &rf.cdata
 
-      if cdata.role != Candidate {
-        return false
-      }
-      cdata.currentTerm++
-      cdata.votedFor = rf.me
-      args = RequestVoteArgs{
-        Term: cdata.currentTerm,
-        CandidateId: rf.me,
-        LastLogIndex: len(cdata.log) - 1,
-        LastLogTerm: cdata.log[len(cdata.log) - 1].Term,
-      }
-      return true
+    if cdata.role != Candidate {
+      return false
     }
-    if !prepareCandidacy() {
-      return
+    cdata.currentTerm++
+    cdata.votedFor = rf.me
+    // rf.Log("%+v", cdata)
+    args = RequestVoteArgs{
+      Term: cdata.currentTerm,
+      CandidateId: rf.me,
+      LastLogIndex: len(cdata.log) - 1,
+      LastLogTerm: cdata.log[len(cdata.log) - 1].Term,
     }
-    ch := make(Gchan, len(rf.peers))
-    for p, _ := range rf.peers {
-      if p == rf.me {
-        continue
+    return true
+  }
+  if !prepareCandidacy() {
+    return
+  }
+  ch := make(Gchan, len(rf.peers))
+  for p, _ := range rf.peers {
+    if p == rf.me {
+      continue
+    }
+    peer := p
+    go func() {
+      reply := RequestReply{}
+      ok := rf.sendRequestVote(peer, &args, &reply)
+      if !ok {
+        reply.Term = -1
+        reply.Success = false
       }
-      peer := p
-      go func() {
-        reply := RequestReply{}
-        ok := rf.sendRequestVote(peer, &args, &reply)
-        if !ok {
-          reply.Term = -1
-          reply.Success = false
+      ch <- encodeReply(reply)
+    }()
+  }
+  rf.Log("Fanning out RequestVote %+v", args)
+  votes := 1
+  for 2 * votes <= len(rf.peers) {
+    result := rf.MultiWaitCh(ch, timeoutCh)
+    switch {
+      case result.timeout:
+        return
+      case result.interrupted:
+        return
+      default:
+        reply := result.reply
+        rf.Log("Got RequestVote reply: %+v", reply)
+        if rf.updateTerm(reply.Term, false) {
+          return
         }
-        ch <- encodeReply(reply)
-      }()
-    }
-    // rf.Log("Fanning out RequestVote %+v", args)
-    votes := 1
-    for 2 * votes <= len(rf.peers) {
-      result := rf.MultiWaitCh(ch, timeoutCh)
-      switch {
-        case result.timeout:
-          // Restart the eleciton
-          break
-        case result.interrupted:
-          // Restart the eleciton
-          break
-        default:
-          reply := result.reply
-          // rf.Log("Got RequestVote reply: %+v", reply)
-          if rf.updateTerm(reply.Term, false) {
-            return
-          }
-          if reply.Success {
-            votes++
-          }
+        if reply.Success {
+          votes++
         }
-      }
     }
-    becameLeader := func() bool {
-      if 2 * votes <= len(rf.peers) {
-        return false
-      }
-      rf.RLock()
-      defer rf.RUnlock()
-      return rf.cdata.role == Candidate
-    }
-    if becameLeader() {
-      return
-    }
+  }
+  if 2 * votes <= len(rf.peers) {
+    return
+  }
+  rf.RLock()
+  defer rf.RUnlock()
+  if rf.cdata.role == Candidate {
+    rf.cdata.role = Leader
   }
 }
 
 func (rf *Raft)onLeader() {
-  rf.Log("Became leader at term %d", rf.cdata.currentTerm)
   func() {
     rf.nextIndex = make([]int, len(rf.peers))
     rf.matchIndex = make([]int, len(rf.peers))
@@ -426,15 +406,10 @@ func (rf *Raft)onLeader() {
       rf.matchIndex[i] = 0
     }
   }()
-  for rf.live {
-    if _, isLeader := rf.GetState(); !isLeader {
-      return
-    }
-    rf.replicateLogs()
-  }
+  rf.replicateLogs()
 }
 
-func (rf *Raft) replicateLogs() int {
+func (rf *Raft) replicateLogs() {
   toCh := time.After(getHearbeatTimeout())
   replyChan := make(Gchan, len(rf.peers))
 
@@ -445,7 +420,6 @@ func (rf *Raft) replicateLogs() int {
       numRPCs, numReplies, rf.cdata.currentTerm)
   }()
 
-  stillLeader := true
   sendOne := func (peer int) {
     // rf.Log("Peer %d nextIndex %d", peer, rf.nextIndex[peer])
     args := AppendEntriesArgs{
@@ -465,10 +439,10 @@ func (rf *Raft) replicateLogs() int {
       args.PrevLogTerm = cdata.log[rf.nextIndex[peer] - 1].Term
       args.Entries = cdata.log[rf.nextIndex[peer]:]
       return true
-    })
+    }
 
     if !prepareArgs() {
-      stillLeader = false
+      return
     }
     reply := RequestReply{}
     ok := rf.sendAppendEntries(peer, &args, &reply)
@@ -478,16 +452,14 @@ func (rf *Raft) replicateLogs() int {
       // rf.Log("AppendEntries request %+v got reply %+v", args, reply)
       replyChan <- encodeReply(reply)
     }
-    numRPCs++
   }
 
-  updateMatchIndex := func(peer, appendedNewEntries int) {
+  updateMatchIndex := func(peer, appendedNewEntries int) bool {
     rf.Lock()
     defer rf.Unlock()
     cdata := &rf.cdata
     if cdata.role != Leader {
-      stillLeader = false
-      return
+      return false
     }
     rf.nextIndex[peer] += appendedNewEntries
     rf.matchIndex[peer] = rf.nextIndex[peer] - 1
@@ -512,30 +484,28 @@ func (rf *Raft) replicateLogs() int {
         }
       }
     }
+    return true
   }
 
   for p, _ := range rf.peers {
-    if !stillLeader {
+    if rf.getRole() != Leader {
       return
     }
     if p == rf.me {
       continue
     }
     peer := p
-    go func() {
-      if !sendOne(peer) {
-        stillLeader = false
-      }
-    }()
+    numRPCs++
+    go sendOne(peer)
   }
 
-  for stillLeader && rf.live {
-    result := af.MultiWaitCh(replyChan, toCh)
+  for rf.getRole() == Leader {
+    result := rf.MultiWaitCh(replyChan, toCh)
     switch {
       case result.timeout:
         // Start over
         return
-      case restart.interrupted:
+      case result.interrupted:
         // Start over
         return
       default:
@@ -550,6 +520,7 @@ func (rf *Raft) replicateLogs() int {
           }
         } else {
           rf.nextIndex[reply.Peer]--
+          numRPCs++
           go sendOne(reply.Peer)
         }
     }
@@ -580,11 +551,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
   rf.commitIndex = 0
   rf.lastApplied = 0
 
-  rf.applierWakeup = make(WakeupChan, 10)
-  rf.appliedLogIndex = make(chan int, 10)
-  rf.live = true
+  rf.applierWakeup = make(WakeupChan, 1000)
+  rf.appliedLogIndex = make(chan int, 1000)
+  rf.notifyQ = make(chan bool, 10)
 
-  cdata := CoreData {
+  rf.cdata = CoreData {
     currentTerm: 1,
     votedFor: -1,
     // The first entry is a sentinel.
@@ -597,43 +568,66 @@ func Make(peers []*labrpc.ClientEnd, me int,
   rand.Seed(int64(time.Now().Nanosecond()))
   // rand.Seed(int64(1234567))
   go func() {
-    for rf.live {
-      <-rf.applierWakeup
+    rf.wg.Add(1)
+    defer rf.Log("Applier is exiting.")
+    defer rf.wg.Done()
+    for {
+      live := <-rf.applierWakeup
+      if !live {
+        return
+      }
       for rf.lastApplied < rf.commitIndex {
         msg := ApplyMsg{
           CommandValid: true,
           CommandIndex: rf.lastApplied + 1,
         }
         term := 0
-        rf.af.WithRlock(func(st int, cdata *CoreData) {
-          msg.Command = cdata.log[rf.lastApplied + 1].Cmd
-          term = cdata.log[rf.lastApplied + 1].Term
-        })
+        rf.RLock()
+        msg.Command = rf.cdata.log[rf.lastApplied + 1].Cmd
+        term = rf.cdata.log[rf.lastApplied + 1].Term
+        rf.RUnlock()
         rf.Log("Applied %+v at term %d", msg, term)
         select {
           case rf.applyCh<-msg:
             // No other threads touch 'lastApplied'
             rf.lastApplied++
-          case <-rf.applierWakeup:
+          case live := <-rf.applierWakeup:
+            if !live {
+              return
+            }
         }
       }
     }
-    rf.Log("Applier is exiting.")
   }()
 
   go func() {
-    for rf.live {
-      switch rf.getRole() {
+    rf.wg.Add(1)
+    defer rf.Log("Exiting main loop")
+    defer rf.wg.Done()
+    oldRole := Follower
+    for {
+      role := rf.getRole()
+      switch role {
         case Follower:
-          onFollower()
+          if oldRole != role {
+            rf.Log("Became leader at term %d", rf.cdata.currentTerm)
+          }
+          rf.onFollower()
         case Candidate:
-          onCandidate()
+          if oldRole != role {
+            rf.Log("Became candidate at term %d", rf.cdata.currentTerm)
+          }
+          rf.onCandidate()
         case Leader:
-          onLeader()
+          if oldRole != role {
+            rf.Log("Became leader at term %d", rf.cdata.currentTerm)
+          }
+          rf.onLeader()
         default:
-          break
+          return
       }
+      oldRole = role
     }
-  }
+  }()
 	return rf
 }

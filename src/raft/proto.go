@@ -66,7 +66,7 @@ type Raft struct {
 	sync.RWMutex
   cdata CoreData
 
-  live bool
+  wg sync.WaitGroup
 }
 
 // example RequestVote RPC arguments structure.

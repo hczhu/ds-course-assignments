@@ -18,8 +18,7 @@ const (
   ElectionTimeoutDvMil = 300
   Follower = 0
   Candidate = 1
-  PreLeader = 2
-  Leader = 3
+  Leader = 2
 )
 
 type Gchan chan []byte

@@ -456,6 +456,7 @@ loop:
 			// leader moved on really quickly
 			continue
 		}
+    fmt.Printf("Leader %d term %d\n", leader, term)
 		cmds := []int{}
 		for i := 1; i < iters+2; i++ {
 			x := int(rand.Int31())

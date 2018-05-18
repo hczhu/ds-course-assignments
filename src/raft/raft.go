@@ -246,8 +246,9 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
   }
   isLeader = true
   index = len(cdata.log)
+  term = cdata.currentTerm
   entry := LogEntry{
-    Term: cdata.currentTerm,
+    Term: term,
     Cmd: command,
   }
   cdata.log = append(cdata.log, entry)

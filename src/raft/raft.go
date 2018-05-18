@@ -13,9 +13,9 @@ import "math/rand"
 
 
 const (
-  HeartbeatMil = 250
-  ElectionTimeoutMil = 300
-  ElectionTimeoutDvMil = 100
+  HeartbeatMil = 350
+  ElectionTimeoutMil = 400
+  ElectionTimeoutDvMil = 400
   Follower = 0
   Candidate = 1
   PreLeader = 2
@@ -27,7 +27,7 @@ type Bytes []byte
 
 var gStartTime time.Time = time.Now()
 
-var gPrintLog bool = true
+var gPrintLog bool = false
 var gPersist bool = true
 
 func min(a, b int) int {
@@ -267,7 +267,7 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
     Cmd: command,
   }
   cdata.log = append(cdata.log, entry)
-  // rf.persist()
+  rf.persist()
   rf.Log("Appended entry %+v at %d.", entry, index)
   return
 }
@@ -504,12 +504,21 @@ func (rf *Raft) replicateLogs() {
 
   skipConflictingEntries := func(peer, conflictingTerm, firstIndex int) bool {
     next := &rf.nextIndex[peer]
+    defer rf.Log("Updated peer %d next index to %d", peer, *next)
+
     rf.RLock()
     defer rf.RUnlock()
     cdata := &rf.cdata
     if cdata.role != Leader {
       return false
     }
+
+    if conflictingTerm < 0 {
+      // The follower's log is shorter than the previou probe
+      *next = firstIndex
+      return true
+    }
+
     for *next--; *next > firstIndex; *next-- {
       if cdata.log[*next - 1].Term == conflictingTerm {
         return true

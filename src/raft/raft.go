@@ -474,17 +474,18 @@ func (rf *Raft) replicateLogs() {
 
   updateMatchIndex := func(reply RequestReply) bool {
     peer := reply.Peer
+    newValue := reply.NextIndex + reply.AppendedNewEntries
+    if newValue <= rf.nextIndex[peer] {
+      rf.Log("Got a stale reply: %+v", reply)
+      return true
+    }
+
     rf.RLock()
     defer rf.RUnlock()
     cdata := &rf.cdata
     if cdata.role != Leader {
       return false
     }
-    newValue := reply.NextIndex + reply.AppendedNewEntries
-    if newValue <= rf.nextIndex[peer] {
-      return true
-    }
-
     rf.nextIndex[peer] = newValue
     rf.matchIndex[peer] = rf.nextIndex[peer] - 1
     N := rf.matchIndex[peer]
@@ -509,8 +510,15 @@ func (rf *Raft) replicateLogs() {
     return true
   }
 
-  skipConflictingEntries := func(peer, conflictingTerm, firstIndex int) bool {
+  skipConflictingEntries := func(reply RequestReply) bool {
+    peer := reply.Peer
     next := rf.nextIndex[peer]
+    if next != reply.NextIndex {
+      // Stale reply
+      rf.Log("Got a stale reply: %+v", reply)
+      return true
+    }
+    conflictingTerm, firstIndex := reply.ConflictingTerm, reply.FirstLogIndex
 
     rf.RLock()
     defer func() {
@@ -581,7 +589,7 @@ func (rf *Raft) replicateLogs() {
         } else {
           numRPCs++
           rf.Log("Reacting to reply %+v", reply)
-          if !skipConflictingEntries(reply.Peer, reply.ConflictingTerm, reply.FirstLogIndex) {
+          if !skipConflictingEntries(reply) {
             return
           }
         }

@@ -13,9 +13,9 @@ import "math/rand"
 
 
 const (
-  HeartbeatMil = 200
-  ElectionTimeoutMil = 800
-  ElectionTimeoutDvMil = 300
+  HeartbeatMil = 250
+  ElectionTimeoutMil = 300
+  ElectionTimeoutDvMil = 100
   Follower = 0
   Candidate = 1
   PreLeader = 2
@@ -27,7 +27,8 @@ type Bytes []byte
 
 var gStartTime time.Time = time.Now()
 
-var gPrintLog bool = false
+var gPrintLog bool = true
+var gPersist bool = true
 
 func min(a, b int) int {
   if a < b {
@@ -71,13 +72,14 @@ func (rf *Raft) getRole() int {
 // see paper's Figure 2 for a description of what should be persistent.
 //
 func (rf *Raft) persist() {
+  if !gPersist {
+    return
+  }
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-  rf.RLock()
   e.Encode(rf.cdata.currentTerm)
 	e.Encode(rf.cdata.votedFor)
   e.Encode(rf.cdata.log)
-  rf.RUnlock()
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
 }
@@ -99,8 +101,6 @@ func (rf *Raft) readPersist(data []byte) {
       d.Decode(&log) != nil {
    fmt.Println("Failed to restore the persisted data.")
   } else {
-    rf.Lock()
-    defer rf.Unlock()
     cdata := &rf.cdata
     cdata.currentTerm = currentTerm
     cdata.votedFor = votedFor
@@ -131,6 +131,7 @@ func (rf *Raft) updateTerm(peerTerm int, notify bool) bool {
     cdata.currentTerm = peerTerm
     cdata.votedFor = -1
     updated = true
+    rf.persist()
   }
   rf.Unlock()
   if updated && notify {
@@ -170,6 +171,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestReply) {
   reply.Success = true
   // Can the following steps be done asynchronously (after returning the RPC)?
   cdata.votedFor = args.CandidateId
+  rf.persist()
   rf.Log("Voted for %d during term %d", cdata.votedFor, cdata.currentTerm)
 }
 
@@ -228,9 +230,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *RequestReply) {
       cdata.log[args.PrevLogIndex + matchedLen + 1].Term == args.Entries[matchedLen].Term {
     matchedLen++
   }
+  appended := false
   cdata.log = cdata.log[:args.PrevLogIndex + matchedLen + 1]
   for ;matchedLen < len(args.Entries); matchedLen++ {
     cdata.log = append(cdata.log, args.Entries[matchedLen])
+    appended = true
+  }
+  if appended {
+    rf.persist()
   }
   if args.LeaderCommit > rf.commitIndex {
     rf.commitIndex = min(args.LeaderCommit, len(cdata.log) - 1)
@@ -260,6 +267,7 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
     Cmd: command,
   }
   cdata.log = append(cdata.log, entry)
+  // rf.persist()
   rf.Log("Appended entry %+v at %d.", entry, index)
   return
 }
@@ -317,15 +325,13 @@ func (rf *Raft) MultiWaitCh(gchan Gchan, toCh <-chan time.Time) (result WaitResu
 }
 
 func (rf *Raft)onFollower() {
-  // rf.Log("Became a follower")
+  // Can only be a follower. Don't need to double check
   result := rf.MultiWait(nil, getElectionTimeout())
   switch {
     case result.timeout:
       rf.Lock()
-      cdata := &rf.cdata
-      cdata.currentTerm++
-      cdata.role = Candidate
-      cdata.votedFor = rf.me
+      rf.cdata.role = Candidate
+      // Don't need to persist
       rf.Unlock()
     case result.interrupted:
   }
@@ -345,6 +351,8 @@ func (rf *Raft) onCandidate() {
     }
     cdata.currentTerm++
     cdata.votedFor = rf.me
+    // Don't need to persist
+    // rf.persist()
     // rf.Log("%+v", cdata)
     args = RequestVoteArgs{
       Term: cdata.currentTerm,
@@ -366,11 +374,9 @@ func (rf *Raft) onCandidate() {
     go func() {
       reply := RequestReply{}
       ok := rf.sendRequestVote(peer, &args, &reply)
-      if !ok {
-        reply.Term = -1
-        reply.Success = false
+      if ok {
+        ch <- encodeReply(reply)
       }
-      ch <- encodeReply(reply)
     }()
   }
   rf.Log("Fanning out RequestVote %+v", args)
@@ -407,9 +413,9 @@ func (rf *Raft)onLeader() {
   func() {
     rf.nextIndex = make([]int, len(rf.peers))
     rf.matchIndex = make([]int, len(rf.peers))
-    rf.Lock()
+    rf.RLock()
     logLen := len(rf.cdata.log)
-    rf.Unlock()
+    rf.RUnlock()
     for i, _ := range rf.nextIndex {
       rf.nextIndex[i] = logLen
       rf.matchIndex[i] = 0
@@ -438,8 +444,8 @@ func (rf *Raft) replicateLogs() {
       PrevLogIndex: rf.nextIndex[peer] - 1,
     }
     prepareArgs := func() bool {
-      rf.Lock()
-      defer rf.Unlock()
+      rf.RLock()
+      defer rf.RUnlock()
       cdata := &rf.cdata
       if cdata.role != Leader {
         return false
@@ -458,14 +464,14 @@ func (rf *Raft) replicateLogs() {
     if ok {
       reply.Peer = peer
       reply.AppendedNewEntries = len(args.Entries)
-      // rf.Log("AppendEntries request %+v got reply %+v", args, reply)
+      rf.Log("AppendEntries request %+v got reply %+v", args, reply)
       replyChan <- encodeReply(reply)
     }
   }
 
   updateMatchIndex := func(peer, appendedNewEntries int) bool {
-    rf.Lock()
-    defer rf.Unlock()
+    rf.RLock()
+    defer rf.RUnlock()
     cdata := &rf.cdata
     if cdata.role != Leader {
       return false
@@ -640,9 +646,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
     defer rf.wg.Done()
     role := -1
     for {
-      newRole := rf.getRole()
+      newRole := rf.cdata.role
       if newRole != role {
-        rf.Log("Became role %d", newRole)
+        rf.Log("Became role %d at term %d", newRole, rf.cdata.currentTerm)
       }
       role = newRole
       callback, ok := rf.callbackMap[role]

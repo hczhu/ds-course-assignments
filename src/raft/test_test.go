@@ -742,6 +742,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 			_, _, ok := cfg.rafts[i].Start(rand.Int() % 10000)
 			if ok && cfg.connected[i] {
 				leader = i
+        fmt.Println("Leader", i)
 			}
 		}
 
@@ -772,7 +773,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 			cfg.connect(i)
 		}
 	}
-
+  fmt.Println("Last one()")
 	cfg.one(rand.Int()%10000, servers, true)
 
 	cfg.end()

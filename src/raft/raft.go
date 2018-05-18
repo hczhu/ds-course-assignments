@@ -13,9 +13,9 @@ import "math/rand"
 
 
 const (
-  HeartbeatMil = 550
-  ElectionTimeoutMil = 600
-  ElectionTimeoutDvMil = 400
+  HeartbeatMil = 650
+  ElectionTimeoutMil = 700
+  ElectionTimeoutDvMil = 300
   Follower = 0
   Candidate = 1
   PreLeader = 2
@@ -27,7 +27,7 @@ type Bytes []byte
 
 var gStartTime time.Time = time.Now()
 
-var gPrintLog bool = true
+var gPrintLog bool = false
 var gPersist bool = true
 
 func min(a, b int) int {

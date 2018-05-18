@@ -27,7 +27,7 @@ type Bytes []byte
 
 var gStartTime time.Time = time.Now()
 
-var gPrintLog bool = true
+var gPrintLog bool = false
 
 func min(a, b int) int {
   if a < b {
@@ -209,10 +209,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *RequestReply) {
   shouldResetElectionTimer = !termUpdated
   // A heartbeat must go through all the following steps as well
   rf.leader = args.LeaderId
-  if args.PrevLogIndex >= len(cdata.log) ||
-     args.PrevLogTerm != cdata.log[args.PrevLogIndex].Term {
+  if args.PrevLogIndex >= len(cdata.log) {
+    reply.ConflictingTerm = -1
+    reply.FirstLogIndex = len(cdata.log)
     return
   }
+  if args.PrevLogTerm != cdata.log[args.PrevLogIndex].Term {
+    reply.ConflictingTerm = cdata.log[args.PrevLogIndex].Term;
+    for reply.FirstLogIndex = args.PrevLogIndex;
+        cdata.log[reply.FirstLogIndex - 1].Term == reply.ConflictingTerm;
+        reply.FirstLogIndex-- {}
+    return
+  }
+  reply.Success = true
   matchedLen := 0
   for matchedLen < len(args.Entries) &&
       args.PrevLogIndex + matchedLen + 1 < len(cdata.log) &&
@@ -223,7 +232,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *RequestReply) {
   for ;matchedLen < len(args.Entries); matchedLen++ {
     cdata.log = append(cdata.log, args.Entries[matchedLen])
   }
-  reply.Success = true
   if args.LeaderCommit > rf.commitIndex {
     rf.commitIndex = min(args.LeaderCommit, len(cdata.log) - 1)
   }
@@ -488,6 +496,23 @@ func (rf *Raft) replicateLogs() {
     return true
   }
 
+  skipConflictingEntries := func(peer, conflictingTerm, firstIndex int) bool {
+    next := &rf.nextIndex[peer]
+    rf.RLock()
+    defer rf.RUnlock()
+    cdata := &rf.cdata
+    if cdata.role != Leader {
+      return false
+    }
+    for *next--; *next > firstIndex; *next-- {
+      if cdata.log[*next - 1].Term == conflictingTerm {
+        return true
+      }
+    }
+    for ;*next > 0 && cdata.log[*next - 1].Term == conflictingTerm; *next-- {}
+    return true
+  }
+
   for p, _ := range rf.peers {
     if rf.getRole() != Leader {
       return
@@ -516,11 +541,13 @@ func (rf *Raft) replicateLogs() {
           return
         }
         if reply.Success {
-          if reply.AppendedNewEntries > 0 {
-            updateMatchIndex(reply.Peer, reply.AppendedNewEntries)
+          if reply.AppendedNewEntries > 0 && !updateMatchIndex(reply.Peer, reply.AppendedNewEntries) {
+            return
           }
         } else {
-          rf.nextIndex[reply.Peer]--
+          if !skipConflictingEntries(reply.Peer, reply.ConflictingTerm, reply.FirstLogIndex) {
+            return
+          }
           numRPCs++
           go sendOne(reply.Peer)
         }
@@ -564,6 +591,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
     role: Follower,
   }
 
+  rf.callbackMap = map[int]func() {
+    Follower: rf.onFollower,
+    Candidate: rf.onCandidate,
+    Leader: rf.onLeader,
+  }
+
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
   rand.Seed(int64(time.Now().Nanosecond()))
@@ -605,29 +638,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
     rf.wg.Add(1)
     defer rf.Log("Exiting main loop")
     defer rf.wg.Done()
-    oldRole := Follower
+    role := -1
     for {
-      role := rf.getRole()
-      switch role {
-        case Follower:
-          if oldRole != role {
-            rf.Log("Became leader at term %d", rf.cdata.currentTerm)
-          }
-          rf.onFollower()
-        case Candidate:
-          if oldRole != role {
-            rf.Log("Became candidate at term %d", rf.cdata.currentTerm)
-          }
-          rf.onCandidate()
-        case Leader:
-          if oldRole != role {
-            rf.Log("Became leader at term %d", rf.cdata.currentTerm)
-          }
-          rf.onLeader()
-        default:
-          return
+      newRole := rf.getRole()
+      if newRole != role {
+        rf.Log("Became role %d", newRole)
       }
-      oldRole = role
+      role = newRole
+      callback, ok := rf.callbackMap[role]
+      if !ok {
+        break
+      }
+      callback()
     }
   }()
 	return rf

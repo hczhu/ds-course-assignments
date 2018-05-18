@@ -13,7 +13,7 @@ import "math/rand"
 
 
 const (
-  HeartbeatMil = 650
+  HeartbeatMil = 450
   ElectionTimeoutMil = 700
   ElectionTimeoutDvMil = 300
   Follower = 0
@@ -425,7 +425,6 @@ func (rf *Raft)onLeader() {
 }
 
 func (rf *Raft) replicateLogs() {
-  toCh := time.After(getHearbeatTimeout())
   replyChan := make(Gchan, len(rf.peers))
 
   numRPCs := 0
@@ -434,8 +433,8 @@ func (rf *Raft) replicateLogs() {
     rf.Log("Sent %d RPCs and got %d replies during one replicateLogs call at term %d.",
       numRPCs, numReplies, rf.cdata.currentTerm)
   }()
-
-  sendOne := func (peer int) {
+  var sendRecursively func(peer int)
+  sendRecursively = func (peer int) {
     // rf.Log("Peer %d nextIndex %d", peer, rf.nextIndex[peer])
     args := AppendEntriesArgs{
       LeaderId: rf.me,
@@ -455,31 +454,40 @@ func (rf *Raft) replicateLogs() {
       args.Entries = cdata.log[rf.nextIndex[peer]:]
       return true
     }
-
     if !prepareArgs() {
       return
     }
+		go func() {
+      time.Sleep(getHearbeatTimeout())
+      sendRecursively(peer)
+    }()
+
     reply := RequestReply{}
     ok := rf.sendAppendEntries(peer, &args, &reply)
     if ok {
       reply.Peer = peer
+      reply.NextIndex = args.PrevLogIndex + 1
       reply.AppendedNewEntries = len(args.Entries)
       rf.Log("AppendEntries request %+v got reply %+v", args, reply)
       replyChan <- encodeReply(reply)
     }
   }
 
-  updateMatchIndex := func(peer, appendedNewEntries int) bool {
+  updateMatchIndex := func(reply RequestReply) bool {
+    peer := reply.Peer
     rf.RLock()
     defer rf.RUnlock()
     cdata := &rf.cdata
     if cdata.role != Leader {
       return false
     }
-    rf.nextIndex[peer] += appendedNewEntries
+    newValue := reply.NextIndex + reply.AppendedNewEntries
+    if newValue <= rf.nextIndex[peer] {
+      return true
+    }
+
+    rf.nextIndex[peer] = newValue
     rf.matchIndex[peer] = rf.nextIndex[peer] - 1
-    // rf.Log("matchIndex %+v", rf.matchIndex)
-    // rf.Log("nextIndex %+v", rf.nextIndex)
     N := rf.matchIndex[peer]
     if N > rf.commitIndex && cdata.log[N].Term == cdata.currentTerm {
       numGoodPeers := 1
@@ -547,11 +555,11 @@ func (rf *Raft) replicateLogs() {
     }
     peer := p
     numRPCs++
-    go sendOne(peer)
+    go sendRecursively(peer)
   }
 
   for rf.getRole() == Leader {
-    result := rf.MultiWaitCh(replyChan, toCh)
+    result := rf.MultiWait(replyChan, 0)
     switch {
       case result.timeout:
         rf.Log("Timeout!")
@@ -567,16 +575,16 @@ func (rf *Raft) replicateLogs() {
           return
         }
         if reply.Success {
-          if reply.AppendedNewEntries > 0 && !updateMatchIndex(reply.Peer, reply.AppendedNewEntries) {
+          if reply.AppendedNewEntries > 0 &&
+              !updateMatchIndex(reply) {
             return
           }
         } else {
+          numRPCs++
           rf.Log("Reacting to reply %+v", reply)
           if !skipConflictingEntries(reply.Peer, reply.ConflictingTerm, reply.FirstLogIndex) {
             return
           }
-          numRPCs++
-          go sendOne(reply.Peer)
         }
     }
   }
@@ -668,9 +676,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
     role := -1
     for {
       newRole := rf.cdata.role
-      if newRole != role {
-        rf.Log("Became role %d at term %d", newRole, rf.cdata.currentTerm)
-      }
+      rf.Log("Became role %d at term %d", newRole, rf.cdata.currentTerm)
       role = newRole
       callback, ok := rf.callbackMap[role]
       if !ok {

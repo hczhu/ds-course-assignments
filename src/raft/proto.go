@@ -94,6 +94,8 @@ type RequestReply struct {
   Peer int
   // How many new entries the follower just appended?
   AppendedNewEntries int
+  // nextIndex used for the request args
+  NextIndex int
 
   // The leader should skip to an entry with this term
   ConflictingTerm int

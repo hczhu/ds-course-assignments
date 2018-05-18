@@ -39,6 +39,9 @@ const (
   Leader = 3
 )
 
+type Gchan chan []byte
+type Bytes []byte
+
 var gStartTime time.Time = time.Now()
 
 var gPrintLog bool = true
@@ -68,11 +71,15 @@ func (rf *Raft) Log(format string, v ...interface {}) {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (term int, isLeader bool) {
-  term, isLeader = -1, false
-  rf.af.WithRlock(func(st int, cdata *CoreData) {
-	  term, isLeader = cdata.currentTerm, st == Leader || st == PreLeader
-  })
-  return
+  rf.RLock()
+  defer rf.RUnlock()
+	return rf.cdata.currentTerm, rf.cdata.role == Leader
+}
+
+func (rf *Raft) getRole() int {
+  rf.RLock()
+  defer rf.RUnlock()
+	return rf.cdata.role
 }
 
 //
@@ -83,12 +90,11 @@ func (rf *Raft) GetState() (term int, isLeader bool) {
 func (rf *Raft) persist() {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-
-  rf.af.WithRlock(func(st int, cdata *CoreData) {
-    e.Encode(cdata.currentTerm)
-	  e.Encode(cdata.votedFor)
-    e.Encode(cdata.log)
-  })
+  rf.RLock()
+  e.Encode(rf.cdata.currentTerm)
+	e.Encode(rf.cdata.votedFor)
+  e.Encode(rf.cdata.log)
+  rf.RUnlock()
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
 }
@@ -110,11 +116,11 @@ func (rf *Raft) readPersist(data []byte) {
       d.Decode(&log) != nil {
    fmt.Println("Failed to restore the persisted data.")
   } else {
-    rf.af.WithLock(func(st int, cdata *CoreData) {
-      cdata.currentTerm = currentTerm
-      cdata.votedFor = votedFor
-      cdata.log = log
-    })
+    rf.Lock()
+    cdata.currentTerm = currentTerm
+    cdata.votedFor = votedFor
+    cdata.log = log
+    rf.Unlock()
   }
 }
 
@@ -132,85 +138,55 @@ func decodeReply(data Bytes) (reply RequestReply) {
 	return
 }
 
-// Returns true if 'currentTerm' got updated to peerTerm
-func (rf *Raft) updateTerm(peerTerm int) bool {
-  return rf.updateTermAndTrans(peerTerm, true)
-}
-func (rf *Raft) updateTermAndTrans(peerTerm int, transit bool) bool {
+func (rf *Raft) updateTerm(peerTerm int, notify bool) bool {
   updated := false
-  rf.af.WithRlock(func(st int, cdata *CoreData) {
-    if cdata.currentTerm < peerTerm {
-      cdata.currentTerm = peerTerm
-      cdata.votedFor = -1
-      updated = true
-      if transit {
-        rf.af.Transit(Follower)
-      }
-    }
-  })
+  rf.Lock()
+  if cdata.currentTerm < peerTerm {
+    cdata.role = Follower
+    cdata.currentTerm = peerTerm
+    cdata.votedFor = -1
+    updated = true
+  }
+  rf.Unlock()
+  if updated && notify {
+    rf.notifyQ<-true
+  }
   return updated
 }
 
 // RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestReply) {
-  termUpdated := rf.updateTerm(args.Term)
+  termUpdated := rf.updateTerm(args.Term, true)
 
   defer func() {
     if !termUpdated && reply.Success {
       // Reset election timer
-      rf.af.Transit(Follower)
+      rf.notifyQ<-true
     }
   }()
 
-  rf.af.WithLock(func(st int, cdata *CoreData) {
-    reply.Term = cdata.currentTerm
-    reply.Peer = rf.me
-    reply.Success = false
-    if args.Term < cdata.currentTerm ||
-        (cdata.votedFor >=0 && cdata.votedFor != args.CandidateId) {
-      return
-    }
-    lastTerm, lastIndex := cdata.log[len(cdata.log) - 1].Term, len(cdata.log) - 1
-    if lastTerm > args.LastLogTerm ||
-        (lastTerm == args.LastLogTerm && lastIndex > args.LastLogIndex) {
-      return
-    }
-    reply.Success = true
-    // Can the following steps be done asynchronously (after returning the RPC)?
-    cdata.votedFor = args.CandidateId
-    rf.Log("Voted for %d during term %d", cdata.votedFor, cdata.currentTerm)
-  })
+  rf.Lock()
+  defer rf.Unlock()
+  cdata := &rf.cdata
+  reply.Term = cdata.currentTerm
+  reply.Peer = rf.me
+  reply.Success = false
+  if args.Term < cdata.currentTerm ||
+      (cdata.votedFor >=0 && cdata.votedFor != args.CandidateId) {
+    return
+  }
+  // This server must be a follower
+  lastTerm, lastIndex := cdata.log[len(cdata.log) - 1].Term, len(cdata.log) - 1
+  if lastTerm > args.LastLogTerm ||
+      (lastTerm == args.LastLogTerm && lastIndex > args.LastLogIndex) {
+    return
+  }
+  reply.Success = true
+  // Can the following steps be done asynchronously (after returning the RPC)?
+  cdata.votedFor = args.CandidateId
+  rf.Log("Voted for %d during term %d", cdata.votedFor, cdata.currentTerm)
 }
 
-//
-// example code to send a RequestVote RPC to a server.
-// server is the index of the target server in rf.peers[].
-// expects RPC arguments in args.
-// fills in *reply with RPC reply, so caller should
-// pass &reply.
-// the types of the args and reply passed to Call() must be
-// the same as the types of the arguments declared in the
-// handler function (including whether they are pointers).
-//
-// The labrpc package simulates a lossy network, in which servers
-// may be unreachable, and in which requests and replies may be lost.
-// Call() sends a request and waits for a reply. If a reply arrives
-// within a timeout interval, Call() returns true; otherwise
-// Call() returns false. Thus Call() may not return for a while.
-// A false return can be caused by a dead server, a live server that
-// can't be reached, a lost request, or a lost reply.
-//
-// Call() is guaranteed to return (perhaps after a delay) *except* if the
-// handler function on the server side does not return.  Thus there
-// is no need to implement your own timeouts around Call().
-//
-// look at the comments in ../labrpc/labrpc.go for more details.
-//
-// if you're having trouble getting RPC to work, check that you've
-// capitalized all field names in structs passed over RPC, and
-// that the caller passes the address of the reply struct with &, not
-// the struct itself.
-//
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
@@ -218,7 +194,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 // Receiver's handler
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *RequestReply) {
-  termUpdated := rf.updateTerm(args.Term)
+  termUpdated := rf.updateTerm(args.Term, true)
 
   defer func() {
     if rf.commitIndex > rf.lastApplied {
@@ -226,47 +202,45 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *RequestReply) {
     }
   }()
 
-  curTermSnapshot := 0
-  rf.af.WithRlock(func(st int, cdata *CoreData) {
-    curTermSnapshot = cdata.currentTerm
-  })
-
-  reply.Term = curTermSnapshot
   reply.Peer = rf.me
   reply.Success = false
-  if args.Term < curTermSnapshot {
+  shouldResetElectionTimer := false
+  rf.Lock()
+  defer func() {
+    rf.Unlock()
+    if shouldResetElectionTimer {
+      // Reset election timer
+      rf.notifyQ<-true
+    }
+  }()
+  cdata := &rf.cdata
+  reply.Term = cdata.currentTerm
+  if args.Term < cdata.currentTerm {
     // out-of-date leader
     return
   }
+  // This server can't be a leader from here
+  shouldResetElectionTimer = !termUpdated
   // A heartbeat must go through all the following steps as well
   rf.leader = args.LeaderId
-  defer func() {
-    if !termUpdated {
-      // Reset election timer
-      rf.af.Transit(Follower)
-    }
-  }()
-
-  rf.af.WithLock(func(st int, cdata *CoreData) {
-    if args.PrevLogIndex >= len(cdata.log) ||
-       args.PrevLogTerm != cdata.log[args.PrevLogIndex].Term {
-      return
-    }
-    matchedLen := 0
-    for matchedLen < len(args.Entries) &&
-        args.PrevLogIndex + matchedLen + 1 < len(cdata.log) &&
-        cdata.log[args.PrevLogIndex + matchedLen + 1].Term == args.Entries[matchedLen].Term {
-      matchedLen++
-    }
-    cdata.log = cdata.log[:args.PrevLogIndex + matchedLen + 1]
-    for ;matchedLen < len(args.Entries); matchedLen++ {
-      cdata.log = append(cdata.log, args.Entries[matchedLen])
-    }
-    reply.Success = true
-    if args.LeaderCommit > rf.commitIndex {
-      rf.commitIndex = min(args.LeaderCommit, len(cdata.log) - 1)
-    }
-  })
+  if args.PrevLogIndex >= len(cdata.log) ||
+     args.PrevLogTerm != cdata.log[args.PrevLogIndex].Term {
+    return
+  }
+  matchedLen := 0
+  for matchedLen < len(args.Entries) &&
+      args.PrevLogIndex + matchedLen + 1 < len(cdata.log) &&
+      cdata.log[args.PrevLogIndex + matchedLen + 1].Term == args.Entries[matchedLen].Term {
+    matchedLen++
+  }
+  cdata.log = cdata.log[:args.PrevLogIndex + matchedLen + 1]
+  for ;matchedLen < len(args.Entries); matchedLen++ {
+    cdata.log = append(cdata.log, args.Entries[matchedLen])
+  }
+  reply.Success = true
+  if args.LeaderCommit > rf.commitIndex {
+    rf.commitIndex = min(args.LeaderCommit, len(cdata.log) - 1)
+  }
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *RequestReply) bool {
@@ -274,54 +248,24 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Re
 	return ok
 }
 
-//
-// the service using Raft (e.g. a k/v server) wants to start
-// agreement on the next command to be appended to Raft's log. if this
-// server isn't the leader, returns false. otherwise start the
-// agreement and return immediately. there is no guarantee that this
-// command will ever be committed to the Raft log, since the leader
-// may fail or lose an election. even if the Raft instance has been killed,
-// this function should return gracefully.
-//
-// the first return value is the index that the command will appear at
-// if it's ever committed. the second return value is the current
-// term. the third return value is true if this server believes it is
-// the leader.
-//
 func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) {
 	index = -1
 	term = -1
   isLeader = false
-  rf.af.WithLock(func(st int, cdata *CoreData) {
-    if st != Leader && st != PreLeader {
-      return
-    }
-    isLeader = true
-    term = cdata.currentTerm
-    index = len(cdata.log)
-    entry := LogEntry{
-      Term: term,
-      Cmd: command,
-    }
-    cdata.log = append(cdata.log, entry)
-    rf.Log("Appended entry %+v at %d.", entry, index)
-  })
-  return
-  if isLeader {
-    toCh := time.After(2 * getHearbeatTimeout())
-    for {
-      select {
-        case <-toCh:
-          rf.Log("Agreement timeouts")
-          return
-        case logIndex := <-rf.appliedLogIndex:
-          if logIndex >= index {
-            return
-          }
-      }
-    }
+  rf.Lock()
+  defer rf.Unlock()
+  cdata := &rf.cdata
+  if cdata.role != Leader {
+    return
   }
-	return
+  isLeader = true
+  index = len(cdata.log)
+  entry := LogEntry{
+    Term: cdata.currentTerm,
+    Cmd: command,
+  }
+  cdata.log = append(cdata.log, entry)
+  rf.Log("Appended entry %+v at %d.", entry, index)
 }
 
 //
@@ -332,9 +276,10 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 //
 func (rf *Raft) Kill() {
   rf.Log("Killing the server")
-  rf.Log("Stopping the AsyncFSA")
-  rf.af.Stop()
+  rf.live = false
   rf.applierWakeup<-false
+  rf.applierWakeup<-false
+  rf.notifyQ<-false
 }
 
 func getElectionTimeout() time.Duration {
@@ -345,107 +290,163 @@ func getHearbeatTimeout() time.Duration {
   return time.Duration(HeartbeatMil) * time.Millisecond
 }
 
-func (rf *Raft)onFollower(af *AsyncFSA) int {
-  timeout, _, nextSt := rf.af.MultiWait(nil, getElectionTimeout())
-  if timeout {
-    return Candidate
-  }
-  return nextSt
+type WaitResult struct {
+  timeout bool
+  interrupted bool
+  RequestReply reply
 }
 
-func (rf *Raft) onCandidate(af *AsyncFSA) int {
-  timeoutCh := time.After(getElectionTimeout())
-  var args RequestVoteArgs
-  af.WithLock(func(st int, cdata *CoreData) {
-    cdata.currentTerm++
-    cdata.votedFor = rf.me
-    args = RequestVoteArgs{
-      Term: cdata.currentTerm,
-      CandidateId: rf.me,
-      LastLogIndex: len(cdata.log) - 1,
-      LastLogTerm: cdata.log[len(cdata.log) - 1].Term,
-    }
-  })
+func (rf *Raft)MultiWait(gchan Gchan, timeout time.Duration) WaitResult {
+  if timeout <= 0 {
+    timeout = time.Duration(100000) * time.Hour
+  }
+  return rf.MultiWaitCh(gchan, time.After(timeout))
+}
 
-  ch := make(Gchan, len(rf.peers))
-  for p, _ := range rf.peers {
-    if p == rf.me {
-      continue
+func (rf *Raft) MultiWaitCh(gchan Gchan, toCh <-chan time.Time) (result WaitResult) {
+  if gchan == nil {
+    gchan = make(Gchan)
+  }
+  select {
+    case <-toCh:
+      result.timeout = true
+    case <-rf.notifyQ:
+      result.interrupted = true
+    case replyBytes := <-gchan:
+      result.reply = decodeReply(replyBytes)
+  }
+  return
+}
+
+func (rf *Raft)onFollower() {
+  rf.Log("Became a follower")
+  for rf.live {
+    result := rf.MultiWait(nil, getElectionTimeout())
+      case result.timeout:
+        rf.Lock()
+        cdata := &rf.cdata
+        cdata.currentTerm++
+        cdata.role = Candidate
+        cdata.votedFor = rf.me
+        rf.Unlock()
+        return
     }
-    peer := p
-    go func() {
-      reply := RequestReply{}
-      ok := rf.sendRequestVote(peer, &args, &reply)
-      if !ok {
-        reply.Term = -1
-        reply.Success = false
+  }
+}
+
+func (rf *Raft) onCandidate() int {
+  rf.Log("Became a candidate")
+  for rf.live {
+    timeoutCh := time.After(getElectionTimeout())
+    var args RequestVoteArgs
+    prepareCandidacy := func() {
+      rf.Lock()
+      defer rf.Unlock()
+      cdata := &rf.cdata
+
+      if cdata.role != Candidate {
+        return false
       }
-      ch <- encodeReply(reply)
-    }()
-  }
-  // rf.Log("Fanning out RequestVote %+v", args)
-  votes := 1
-  for 2 * votes <= len(rf.peers) {
-    timeout, it, nextSt := rf.af.MultiWaitCh(ch, timeoutCh)
-    if timeout {
-      // rf.Log("RequestVote timeouts")
-      return Candidate
-    }
-    if nextSt >= 0 {
-      // rf.Log("RequestVote got interrupted by state %d", nextSt)
-      return nextSt
-    }
-    if it != nil {
-      reply := decodeReply(it)
-      // rf.Log("Got RequestVote reply: %+v", reply)
-      if rf.updateTermAndTrans(reply.Term, false) {
-        return Follower
+      cdata.currentTerm++
+      cdata.votedFor = rf.me
+      args = RequestVoteArgs{
+        Term: cdata.currentTerm,
+        CandidateId: rf.me,
+        LastLogIndex: len(cdata.log) - 1,
+        LastLogTerm: cdata.log[len(cdata.log) - 1].Term,
       }
-      if reply.Success {
-        votes++
+      return true
+    }
+    if !prepareCandidacy() {
+      return
+    }
+    ch := make(Gchan, len(rf.peers))
+    for p, _ := range rf.peers {
+      if p == rf.me {
+        continue
+      }
+      peer := p
+      go func() {
+        reply := RequestReply{}
+        ok := rf.sendRequestVote(peer, &args, &reply)
+        if !ok {
+          reply.Term = -1
+          reply.Success = false
+        }
+        ch <- encodeReply(reply)
+      }()
+    }
+    // rf.Log("Fanning out RequestVote %+v", args)
+    votes := 1
+    for 2 * votes <= len(rf.peers) {
+      result := rf.MultiWaitCh(ch, timeoutCh)
+      switch {
+        case result.timeout:
+          // Restart the eleciton
+          break
+        case result.interrupted:
+          // Restart the eleciton
+          break
+        default:
+          reply := result.reply
+          // rf.Log("Got RequestVote reply: %+v", reply)
+          if rf.updateTerm(reply.Term, false) {
+            return
+          }
+          if reply.Success {
+            votes++
+          }
+        }
       }
     }
+    becameLeader := func() bool {
+      if 2 * votes <= len(rf.peers) {
+        return false
+      }
+      rf.RLock()
+      defer rf.RUnlock()
+      return rf.cdata.role == Candidate
+    }
+    if becameLeader() {
+      return
+    }
   }
-  rf.Log("Got majority votes")
-  return PreLeader
 }
 
-func (rf *Raft)onPreLeader(af *AsyncFSA) int {
-  rf.af.WithRlock(func(st int, cdata *CoreData) {
-    rf.Log("Became leader at term %d", cdata.currentTerm)
-  })
-  rf.nextIndex = make([]int, len(rf.peers))
-  rf.matchIndex = make([]int, len(rf.peers))
-  logLen := 0
-
-  rf.af.WithRlock(func(st int, cdata *CoreData) {
-    logLen = len(cdata.log)
-  })
-  for i, _ := range rf.nextIndex {
-    rf.nextIndex[i] = logLen
-    rf.matchIndex[i] = 0
+func (rf *Raft)onLeader() {
+  rf.Log("Became leader at term %d", rf.cdata.currentTerm)
+  func() {
+    rf.nextIndex = make([]int, len(rf.peers))
+    rf.matchIndex = make([]int, len(rf.peers))
+    rf.Lock()
+    logLen := len(rf.cdata.log)
+    rf.Unlock()
+    for i, _ := range rf.nextIndex {
+      rf.nextIndex[i] = logLen
+      rf.matchIndex[i] = 0
+    }
+  }()
+  for rf.live {
+    if _, isLeader := rf.GetState(); !isLeader {
+      return
+    }
+    rf.replicateLogs()
   }
-  return Leader
 }
 
-func (rf *Raft)onLeader(af *AsyncFSA) int {
-  return rf.replicateLogs(af)
-}
-
-func (rf *Raft) replicateLogs(af *AsyncFSA) int {
+func (rf *Raft) replicateLogs() int {
   toCh := time.After(getHearbeatTimeout())
   replyChan := make(Gchan, len(rf.peers))
 
   numRPCs := 0
   numReplies := 0
   defer func() {
-    af.WithRlock(func(st int, cdata *CoreData) {
-      rf.Log("Sent %d RPCs and got %d replies during one replicateLogs call at term %d.", numRPCs, numReplies, cdata.currentTerm)
-    })
+    rf.Log("Sent %d RPCs and got %d replies during one replicateLogs call at term %d.",
+      numRPCs, numReplies, rf.cdata.currentTerm)
   }()
 
+  stillLeader := true
   sendOne := func (peer int) {
-    numRPCs++
     // rf.Log("Peer %d nextIndex %d", peer, rf.nextIndex[peer])
     args := AppendEntriesArgs{
       LeaderId: rf.me,
@@ -453,12 +454,22 @@ func (rf *Raft) replicateLogs(af *AsyncFSA) int {
       LeaderCommit: rf.commitIndex,
       PrevLogIndex: rf.nextIndex[peer] - 1,
     }
-    af.WithRlock(func(st int, cdata *CoreData) {
+    prepareArgs := func() bool {
+      rf.Lock()
+      defer rf.Unlock()
+      cdata := &rf.cdata
+      if cdata.role != Leader {
+        return false
+      }
       args.Term = cdata.currentTerm
       args.PrevLogTerm = cdata.log[rf.nextIndex[peer] - 1].Term
       args.Entries = cdata.log[rf.nextIndex[peer]:]
+      return true
     })
 
+    if !prepareArgs() {
+      stillLeader = false
+    }
     reply := RequestReply{}
     ok := rf.sendAppendEntries(peer, &args, &reply)
     if ok {
@@ -467,20 +478,23 @@ func (rf *Raft) replicateLogs(af *AsyncFSA) int {
       // rf.Log("AppendEntries request %+v got reply %+v", args, reply)
       replyChan <- encodeReply(reply)
     }
+    numRPCs++
   }
 
   updateMatchIndex := func(peer, appendedNewEntries int) {
+    rf.Lock()
+    defer rf.Unlock()
+    cdata := &rf.cdata
+    if cdata.role != Leader {
+      stillLeader = false
+      return
+    }
     rf.nextIndex[peer] += appendedNewEntries
     rf.matchIndex[peer] = rf.nextIndex[peer] - 1
     // rf.Log("matchIndex %+v", rf.matchIndex)
     // rf.Log("nextIndex %+v", rf.nextIndex)
     N := rf.matchIndex[peer]
-    inCurrentTern := false
-    rf.af.WithRlock(func(st int, cdata *CoreData) {
-      assert(N < len(cdata.log), "%d out of log bound %d", N, len(cdata.log))
-      inCurrentTern = cdata.log[N].Term == cdata.currentTerm
-    })
-    if N > rf.commitIndex && inCurrentTern {
+    if N > rf.commitIndex && cdata.log[N].Term == cdata.currentTerm {
       numGoodPeers := 1
       for p, match := range rf.matchIndex {
         if p == rf.me {
@@ -501,39 +515,45 @@ func (rf *Raft) replicateLogs(af *AsyncFSA) int {
   }
 
   for p, _ := range rf.peers {
+    if !stillLeader {
+      return
+    }
     if p == rf.me {
       continue
     }
     peer := p
-    go sendOne(peer)
+    go func() {
+      if !sendOne(peer) {
+        stillLeader = false
+      }
+    }()
   }
 
-  for {
-    timeout, replyBytes, nextSt := af.MultiWaitCh(replyChan, toCh)
-    if timeout {
-      break
-    }
-    if nextSt >= 0 {
-      // Interrupted
-      return nextSt
-    }
-    assert(replyBytes != nil, "Should have got a reply")
-    reply := decodeReply(replyBytes)
-    if rf.updateTermAndTrans(reply.Term, false) {
-      return Follower
-    }
-    numReplies++
-    if reply.Success {
-      if reply.AppendedNewEntries > 0 {
-        updateMatchIndex(reply.Peer, reply.AppendedNewEntries)
-      }
-    } else {
-      rf.nextIndex[reply.Peer]--
-      assert(rf.nextIndex[reply.Peer] > 0, "next index shouldn't reach 0")
-      go sendOne(reply.Peer)
+  for stillLeader && rf.live {
+    result := af.MultiWaitCh(replyChan, toCh)
+    switch {
+      case result.timeout:
+        // Start over
+        return
+      case restart.interrupted:
+        // Start over
+        return
+      default:
+        numReplies++
+        reply := result.reply
+        if rf.updateTerm(reply.Term, false) {
+          return
+        }
+        if reply.Success {
+          if reply.AppendedNewEntries > 0 {
+            updateMatchIndex(reply.Peer, reply.AppendedNewEntries)
+          }
+        } else {
+          rf.nextIndex[reply.Peer]--
+          go sendOne(reply.Peer)
+        }
     }
   }
-  return Leader
 }
 
 //
@@ -562,30 +582,23 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
   rf.applierWakeup = make(WakeupChan, 10)
   rf.appliedLogIndex = make(chan int, 10)
+  rf.live = true
 
   cdata := CoreData {
     currentTerm: 1,
     votedFor: -1,
     // The first entry is a sentinel.
     log: make([]LogEntry, 1),
+    role: Follower,
   }
-
-  rf.af = MakeAsyncFSA(Follower, cdata)
-  rf.af.AddCallback(Follower, rf.onFollower).AddCallback(
-    Candidate, rf.onCandidate).AddCallback(
-    PreLeader, rf.onPreLeader).AddCallback(
-    Leader, rf.onLeader).SetLogger(rf.Log).Start()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
   rand.Seed(int64(time.Now().Nanosecond()))
   // rand.Seed(int64(1234567))
-
   go func() {
-    for {
-      if live := <-rf.applierWakeup; !live {
-        break
-      }
+    for rf.live {
+      <-rf.applierWakeup
       for rf.lastApplied < rf.commitIndex {
         msg := ApplyMsg{
           CommandValid: true,
@@ -601,14 +614,26 @@ func Make(peers []*labrpc.ClientEnd, me int,
           case rf.applyCh<-msg:
             // No other threads touch 'lastApplied'
             rf.lastApplied++
-          case live := <-rf.applierWakeup:
-            if !live {
-              break
-            }
+          case <-rf.applierWakeup:
         }
       }
     }
     rf.Log("Applier is exiting.")
   }()
+
+  go func() {
+    for rf.live {
+      switch rf.getRole() {
+        case Follower:
+          onFollower()
+        case Candidate:
+          onCandidate()
+        case Leader:
+          onLeader()
+        default:
+          break
+      }
+    }
+  }
 	return rf
 }

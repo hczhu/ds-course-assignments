@@ -1,7 +1,7 @@
 package raft
 
 import "labrpc"
-// import "sync"
+import "sync"
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -36,6 +36,7 @@ type CoreData struct {
   votedFor int
   // The first entry is a sentinel
   log []LogEntry
+  role int
 }
 
 // A Go object implementing a single Raft peer.
@@ -56,11 +57,16 @@ type Raft struct {
   nextIndex []int
   matchIndex []int
 
-  af *AsyncFSA
-
   applierWakeup WakeupChan
-
   appliedLogIndex chan int
+
+  // False mean termination
+  notifyQ chan bool
+
+	sync.RWMutex
+  cdata CoreData
+
+  live bool
 }
 
 // example RequestVote RPC arguments structure.

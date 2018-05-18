@@ -7,10 +7,8 @@ import "fmt"
 import "log"
 
 type Callback func(af *AsyncFSA)int
-type Gchan chan []byte
-type Bytes []byte
 type Logger func(string, ...interface {})
-type CdataCob func(st int, cdata *CoreData)
+type CdataCob func(cdata *CoreData)
 
 const (
   StopState = 123456789
@@ -24,15 +22,13 @@ type AsyncFSA struct {
   logger Logger
 
 	sync.RWMutex
-  st int
   cdata CoreData
 }
 
-func MakeAsyncFSA(initStat int, cdata CoreData) *AsyncFSA {
+func MakeAsyncFSA(cdata CoreData) *AsyncFSA {
   af := &AsyncFSA{}
   af.transMap = make(map[int]Callback)
   af.msgQ = make(chan int, 100)
-  af.st = initStat
   af.cdata = cdata
   af.logger = func(format string, v ...interface{}) {
     fmt.Println(fmt.Sprintf(format, v...))
@@ -62,34 +58,28 @@ func (af *AsyncFSA)AddCallback(st int, callback Callback) *AsyncFSA{
   return af
 }
 
-func (af *AsyncFSA)getState() int {
-  af.RLock()
-  defer af.RUnlock()
-  return af.st
-}
-func (af *AsyncFSA)setState(st int) {
-  af.Lock()
-  defer af.Unlock()
-  af.st = st
-}
-
 func (af *AsyncFSA)Start() {
   af.wg.Add(1)
   go func() {
     // This is the only thread which modifies the internal state
     // of AsyncFSA.
+    role := StopState
+    af.WithRlock(func(cdata *CoreData) {
+      role = cdata.role
+    })
     for {
-      st := af.getState()
-      callback, ok := af.transMap[st]
+      callback, ok := af.transMap[role]
       if !ok {
         af.logger("Exiting AsyncFSA.")
-        af.setState(StopState)
         break
       }
-      nextSt := callback(af)
-      af.setState(nextSt)
-      if nextSt != st {
-        af.logger("AsyncFSA transited to state: %d", nextSt)
+      oldRole := role
+      callback(af)
+      af.WithRlock(func(cdata *CoreData) {
+        role = cdata.role
+      })
+      if oldRole != role {
+        af.logger("AsyncFSA transited to state: %d", role)
       }
     }
     af.wg.Done()
@@ -97,7 +87,10 @@ func (af *AsyncFSA)Start() {
 }
 
 func (af *AsyncFSA)Stop() {
-  af.msgQ<- StopState
+  af.WithLock(func(cdata *CoreData) {
+    cdata.role = Stop
+  })
+  af.msgQ<-StopState
   af.Wait()
 }
 
@@ -107,32 +100,6 @@ func (af *AsyncFSA)Wait() {
 
 func (af *AsyncFSA)Transit(st int) {
   af.msgQ<-st
-}
-
-// Return -1, if timeout
-func (af *AsyncFSA) MultiWait(gchan Gchan, timeout time.Duration) (
-  bool, Bytes, int) {
-  if timeout <= 0 {
-    timeout = time.Duration(100000) * time.Hour
-  }
-  return af.MultiWaitCh(gchan, time.After(timeout))
-}
-
-func (af *AsyncFSA) MultiWaitCh(gchan Gchan, toCh <-chan time.Time) (
-  bool, Bytes, int) {
-  if gchan == nil {
-    gchan = make(Gchan)
-  }
-  select {
-    case <-toCh:
-      return true, nil, -1
-    case nextState := <-af.msgQ:
-      return false, nil, nextState
-    case gv := <-gchan:
-      return false, gv, -1
-  }
-  log.Fatal("Shouldn't reach here")
-  return false, nil, -1
 }
 
 /*

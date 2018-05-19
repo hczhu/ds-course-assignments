@@ -36,9 +36,9 @@ func min(a, b int) int {
   return b
 }
 
-func assert(cond bool, format string, v ...interface {}) {
+func (rf *Raft)assert(cond bool, format string, v ...interface {}) {
   if !cond {
-    panic(fmt.Sprintf(format, v...))
+    panic(fmt.Sprintf(format, v...) + fmt.Sprintf(" Rack struct: %+v", rf))
   }
 }
 
@@ -73,6 +73,13 @@ func (rf *Raft) getRole() int {
 func (rf *Raft) persist() {
   if !gPersist {
     return
+  }
+  switch rf.cdata.role {
+    case Follower:
+    case Candidate:
+      fallthrough
+    case Leader:
+      rf.assert(rf.cdata.votedFor == rf.me, "A non-follower should vote for itself")
   }
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
@@ -161,7 +168,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestReply) {
     return
   }
   // This server must be a follower
-  assert(cdata.role == Follower, "Should be a follower")
+  rf.assert(cdata.role == Follower, "Should be a follower")
   lastTerm, lastIndex := cdata.log[len(cdata.log) - 1].Term, len(cdata.log) - 1
   if lastTerm > args.LastLogTerm ||
       (lastTerm == args.LastLogTerm && lastIndex > args.LastLogIndex) {
@@ -229,13 +236,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *RequestReply) {
       cdata.log[args.PrevLogIndex + matchedLen + 1].Term == args.Entries[matchedLen].Term {
     matchedLen++
   }
-  appended := false
-  cdata.log = cdata.log[:args.PrevLogIndex + matchedLen + 1]
+  modified := false
+  if args.PrevLogIndex + matchedLen + 1 < len(cdata.log) {
+    cdata.log = cdata.log[:args.PrevLogIndex + matchedLen + 1]
+    modified = true
+  }
   for ;matchedLen < len(args.Entries); matchedLen++ {
     cdata.log = append(cdata.log, args.Entries[matchedLen])
-    appended = true
+    modified = true
   }
-  if appended {
+  if modified {
     rf.persist()
   }
   if args.LeaderCommit > rf.commitIndex {
@@ -405,6 +415,7 @@ func (rf *Raft) onCandidate() {
   defer rf.RUnlock()
   if rf.cdata.role == Candidate {
     rf.cdata.role = Leader
+    rf.persist()
   }
 }
 

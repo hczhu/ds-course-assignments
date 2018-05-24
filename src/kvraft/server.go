@@ -109,6 +109,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 //
 func (kv *KVServer) Kill() {
 	kv.rf.Kill()
+  fmt.Println("Killed raft")
   kv.applyCh <- raft.ApplyMsg {
     Command: Cmd {
       Quit: true,
@@ -157,7 +158,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
   kv.wg.Add(1)
   go func() {
     dupCmds := 0
-    defer kv.rf.Log("Exiting KV applier with %d duplicate cmds.", dupCmds)
+    defer fmt.Printf("Exiting KV applier with %d duplicate cmds\n.", dupCmds)
     defer kv.wg.Done()
     for {
       msg := <-kv.applyCh
@@ -177,7 +178,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
         case OpAppend:
           kv.kvMap[cmd.Key] += cmd.Value
       }
-      kv.rf.Log("Applied %+v", msg)
+      fmt.Printf("Applied %+v\n", msg)
     }
   }()
 	return kv

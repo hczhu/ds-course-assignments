@@ -49,7 +49,7 @@ func (kv *KVServer) commitOne(cmd Cmd) int {
   }
   ret := ErrCommitTimeout
   defer func() {
-    fmt.Printf("Committing log item: %+v at index %d at term %d status: %d.\n",
+    kv.rf.Log("Committing log item: %+v at index %d at term %d status: %d.\n",
       cmd, logIndex, term, ret)
   }()
   <-time.After(CommitTimeout)
@@ -109,7 +109,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 //
 func (kv *KVServer) Kill() {
 	kv.rf.Kill()
-  fmt.Println("Killed raft")
+  kv.rf.Log("Killed raft")
   kv.applyCh <- raft.ApplyMsg {
     Command: Cmd {
       Quit: true,
@@ -158,7 +158,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
   kv.wg.Add(1)
   go func() {
     dupCmds := 0
-    defer fmt.Printf("Exiting KV applier with %d duplicate cmds\n.", dupCmds)
+    defer kv.rf.Log("Exiting KV applier with %d duplicate cmds\n.", dupCmds)
     defer kv.wg.Done()
     for {
       msg := <-kv.applyCh
@@ -178,7 +178,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
         case OpAppend:
           kv.kvMap[cmd.Key] += cmd.Value
       }
-      fmt.Printf("Applied %+v\n", msg)
+      kv.rf.Log("Applied %+v\n", msg)
     }
   }()
 	return kv

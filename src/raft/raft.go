@@ -448,7 +448,7 @@ func (rf *Raft)onLeader() {
       rf.matchIndex[i] = 0
     }
   }()
-  for rf.getRole() == Leader {
+  for rf.live && rf.getRole() == Leader {
     rf.replicateLogs()
   }
 }

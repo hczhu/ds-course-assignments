@@ -41,7 +41,6 @@ type KVServer struct {
 
   wg sync.WaitGroup
 
-  cond sync.Cond
   callerCh chan bool
 }
 
@@ -92,7 +91,9 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
     reply.Err = "Commit timeout"
     return
   }
+  kv.RLock()
   v, ok := kv.kvMap[args.Key]
+  kv.RUnlock()
   if ok {
     reply.Value = v
   } else {
@@ -202,12 +203,14 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
         return true
       }
       kv.clientLastSeq[cmd.ClientId] = cmd.Seq
+      kv.Lock()
       switch cmd.CmdType {
         case OpPut:
           kv.kvMap[cmd.Key] = cmd.Value
         case OpAppend:
           kv.kvMap[cmd.Key] += cmd.Value
       }
+      kv.Unlock()
       kv.rf.Log("Applied %+v\n", msg)
       return true
     }

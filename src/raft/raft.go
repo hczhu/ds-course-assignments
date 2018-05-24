@@ -301,9 +301,7 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 //
 func (rf *Raft) Kill() {
   rf.Log("Killing the server")
-  rf.Lock()
-  rf.cdata.role = -1
-  rf.Unlock()
+  rf.live = false
   rf.applierWakeup<-false
   rf.notifyQ<-false
   rf.wg.Wait()
@@ -657,6 +655,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
   rf.applierWakeup = make(WakeupChan, 1000)
   rf.appliedLogIndex = make(chan int, 1000)
   rf.notifyQ = make(chan bool, 10)
+  rf.live = true
 
   rf.cdata = CoreData {
     currentTerm: 1,
@@ -716,7 +715,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
     defer rf.Log("Exiting main loop")
     defer rf.wg.Done()
     role := -1
-    for {
+    for rf.live {
       newRole := rf.getRole()
       term, _ := rf.GetState()
       rf.Log("Became role %d at term %d", newRole, term)

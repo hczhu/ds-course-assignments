@@ -69,6 +69,8 @@ type Raft struct {
   wg sync.WaitGroup
 
   callbackMap map[int]func()
+
+  live bool
 }
 
 // example RequestVote RPC arguments structure.

@@ -188,7 +188,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 // Receiver's handler
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *RequestReply) {
-  rf.Log("Got AppendEntriesArgs %+v", *args)
+  // rf.Log("Got AppendEntriesArgs %+v", *args)
   if args == nil {
     rf.Log("Nil input args for AppendEntriesArgs")
     return
@@ -262,7 +262,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *RequestReply) {
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *RequestReply) bool {
-  rf.Log("Sent AppendEntriesArgs %+v to peer %d", *args, server)
+  // rf.Log("Sent AppendEntriesArgs %+v to peer %d", *args, server)
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
@@ -356,6 +356,8 @@ func (rf *Raft)onFollower() {
     case result.timeout:
       rf.Lock()
       rf.cdata.role = Candidate
+      // cdata.currentTerm++
+      rf.cdata.votedFor = rf.me
       // Don't need to persist
       rf.Unlock()
     case result.interrupted:

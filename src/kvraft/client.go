@@ -73,7 +73,8 @@ func (ck *Clerk) Get(key string) string {
       if reply.WrongLeader {
         ck.leader = reply.Leader
         return false
-      } else if reply.Err == "" {
+      }
+      if reply.Err == "" {
         return true
       }
     }

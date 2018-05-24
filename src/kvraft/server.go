@@ -7,13 +7,13 @@ import (
 	"raft"
 	"sync"
   "time"
-  "fmt"
+  // "fmt"
   // "sync/atomic"
 )
 
 const (
   Debug = 0
-  CommitTimeout = time.Duration(500) * time.Millisecond
+  CommitTimeout = time.Duration(200) * time.Millisecond
   Success = 0
   ErrWrongLeader = 1
   ErrCommitTimeout = 2
@@ -40,6 +40,9 @@ type KVServer struct {
   clientLastSeq map[int64]uint64
 
   wg sync.WaitGroup
+
+  cond sync.Cond
+  callerCh chan bool
 }
 
 func (kv *KVServer) commitOne(cmd Cmd) int {
@@ -52,7 +55,10 @@ func (kv *KVServer) commitOne(cmd Cmd) int {
     kv.rf.Log("Committing log item: %+v at index %d at term %d status: %d.\n",
       cmd, logIndex, term, ret)
   }()
-  <-time.After(CommitTimeout)
+  select {
+    case <-time.After(CommitTimeout):
+    case <-kv.callerCh:
+  }
   rfTerm, leader := kv.rf.GetState()
   if term == rfTerm && leader && kv.lastAppliedIndex >= logIndex {
     ret = Success
@@ -154,22 +160,32 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
   kv.lastAppliedIndex = 0
   kv.kvMap = make(map[string]string)
   kv.clientLastSeq = make(map[int64]uint64)
+  kv.callerCh = make(chan bool, 1000)
+  // kv.cond = sync.NewCond(&sync.Mutex{})
 
   kv.wg.Add(1)
   go func() {
     dupCmds := 0
     defer kv.rf.Log("Exiting KV applier with %d duplicate cmds\n.", dupCmds)
     defer kv.wg.Done()
-    for {
+    run := func() bool {
       msg := <-kv.applyCh
       cmd := msg.Command.(Cmd)
       if cmd.Quit {
-        return
+        return false
+      }
+      defer func() {
+        if _, isLeader := kv.rf.GetState(); isLeader {
+          kv.callerCh<-true
+        }
+      }()
+      if cmd.CmdType == OpGet {
+        return true
       }
       kv.lastAppliedIndex = msg.CommandIndex
       if cmd.Seq <= kv.clientLastSeq[cmd.ClientId] {
         dupCmds++
-        continue
+        return true
       }
       kv.clientLastSeq[cmd.ClientId] = cmd.Seq
       switch cmd.CmdType {
@@ -179,7 +195,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
           kv.kvMap[cmd.Key] += cmd.Value
       }
       kv.rf.Log("Applied %+v\n", msg)
+      return true
     }
+    for run() { }
   }()
 	return kv
 }

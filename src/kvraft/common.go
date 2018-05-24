@@ -3,6 +3,9 @@ package raftkv
 const (
 	OK       = "OK"
 	ErrNoKey = "ErrNoKey"
+  OpPut = 0
+  OpAppend = 1
+  OpGet = 2
 )
 
 type Err string
@@ -12,14 +15,14 @@ type PutAppendArgs struct {
 	Key   string
 	Value string
 	Op    string // "Put" or "Append"
-	// You'll have to add definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+  Client int64
+  Seq uint64
 }
 
 type PutAppendReply struct {
 	WrongLeader bool
 	Err         Err
+  Leader      int
 }
 
 type GetArgs struct {
@@ -29,6 +32,16 @@ type GetArgs struct {
 
 type GetReply struct {
 	WrongLeader bool
+  Leader      int
 	Err         Err
 	Value       string
+}
+
+type Cmd struct {
+  CmdType int
+  Key string
+  Value string
+  Seq uint64
+  ClientId int64
+  Quit bool
 }

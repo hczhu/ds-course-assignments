@@ -6,9 +6,18 @@ import (
 	"log"
 	"raft"
 	"sync"
+  "time"
+  "fmt"
+  // "sync/atomic"
 )
 
-const Debug = 0
+const (
+  Debug = 0
+  CommitTimeout = time.Duration(500) * time.Millisecond
+  Success = 0
+  ErrWrongLeader = 1
+  ErrCommitTimeout = 2
+)
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -17,31 +26,79 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-
-type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
-}
-
 type KVServer struct {
-	mu      sync.Mutex
+	sync.RWMutex
 	me      int
 	rf      *raft.Raft
 	applyCh chan raft.ApplyMsg
 
 	maxraftstate int // snapshot if log grows this big
 
-	// Your definitions here.
+  lastAppliedIndex int
+
+  kvMap map[string]string
+  clientLastSeq map[int64]uint64
+
+  wg sync.WaitGroup
 }
 
+func (kv *KVServer) commitOne(cmd Cmd) int {
+  logIndex, term, isLeader := kv.rf.Start(cmd)
+  if !isLeader {
+    return ErrWrongLeader
+  }
+  ret := ErrCommitTimeout
+  defer func() {
+    fmt.Printf("Committing log item: %+v at index %d at term %d status: %d.\n",
+      cmd, logIndex, term, ret)
+  }()
+  <-time.After(CommitTimeout)
+  rfTerm, leader := kv.rf.GetState()
+  if term == rfTerm && leader && kv.lastAppliedIndex >= logIndex {
+    ret = Success
+  }
+  return ret
+}
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
+  cmd := Cmd{
+    CmdType: OpGet,
+  }
+  ret := kv.commitOne(cmd)
+  if ret == ErrWrongLeader {
+    reply.WrongLeader = true
+    reply.Leader = kv.rf.GetLeader()
+    return
+  } else if ret == ErrCommitTimeout {
+    reply.Err = "Commit timeout"
+    return
+  }
+  v, ok := kv.kvMap[args.Key]
+  if ok {
+    reply.Value = v
+  } else {
+    reply.Err = ErrNoKey
+  }
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+  cmd := Cmd{
+    CmdType: OpPut,
+    Key: args.Key,
+    Value: args.Value,
+    Seq: args.Seq,
+    ClientId: args.Client,
+  }
+  if args.Op == "Append" {
+    cmd.CmdType = OpAppend
+  }
+  ret := kv.commitOne(cmd)
+  if ret == ErrWrongLeader {
+    reply.Leader = kv.rf.GetLeader()
+    reply.WrongLeader = true
+  } else if ret == ErrCommitTimeout {
+    reply.Err = "Commit timeout"
+  }
 }
 
 //
@@ -52,7 +109,12 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 //
 func (kv *KVServer) Kill() {
 	kv.rf.Kill()
-	// Your code here, if desired.
+  kv.applyCh <- raft.ApplyMsg {
+    Command: Cmd {
+      Quit: true,
+    },
+  }
+  kv.wg.Wait()
 }
 
 //
@@ -72,18 +134,51 @@ func (kv *KVServer) Kill() {
 func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *KVServer {
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
-	labgob.Register(Op{})
+	labgob.Register(PutAppendArgs{})
+	labgob.Register(PutAppendReply{})
+	labgob.Register(GetArgs{})
+	labgob.Register(GetReply{})
+	labgob.Register(raft.AppendEntriesArgs{})
+	labgob.Register(Cmd{})
+	labgob.Register(raft.LogEntry{})
+	labgob.Register(raft.ApplyMsg{})
 
 	kv := new(KVServer)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
 
-	// You may need initialization code here.
-
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
-	// You may need initialization code here.
+  kv.lastAppliedIndex = 0
+  kv.kvMap = make(map[string]string)
+  kv.clientLastSeq = make(map[int64]uint64)
 
+  kv.wg.Add(1)
+  go func() {
+    dupCmds := 0
+    defer kv.rf.Log("Exiting KV applier with %d duplicate cmds.", dupCmds)
+    defer kv.wg.Done()
+    for {
+      msg := <-kv.applyCh
+      cmd := msg.Command.(Cmd)
+      if cmd.Quit {
+        return
+      }
+      kv.lastAppliedIndex = msg.CommandIndex
+      if cmd.Seq <= kv.clientLastSeq[cmd.ClientId] {
+        dupCmds++
+        continue
+      }
+      kv.clientLastSeq[cmd.ClientId] = cmd.Seq
+      switch cmd.CmdType {
+        case OpPut:
+          kv.kvMap[cmd.Key] = cmd.Value
+        case OpAppend:
+          kv.kvMap[cmd.Key] += cmd.Value
+      }
+      kv.rf.Log("Applied %+v", msg)
+    }
+  }()
 	return kv
 }

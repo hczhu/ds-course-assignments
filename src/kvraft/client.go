@@ -3,11 +3,15 @@ package raftkv
 import "labrpc"
 import "crypto/rand"
 import "math/big"
+import "sync/atomic"
+// import "fmt"
 
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
-	// You will have to modify this struct.
+  leader int
+  client int64
+  seq uint64
 }
 
 func nrand() int64 {
@@ -20,8 +24,29 @@ func nrand() int64 {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
-	// You'll have to add code here.
+  ck.client = nrand()
+  ck.leader = 0
 	return ck
+}
+
+func (ck *Clerk) tryAllServers(f func(serverId int)bool) {
+  for {
+    visited := make([]bool, len(ck.servers))
+    for nextServer := 0; nextServer < len(ck.servers); {
+      server := ck.leader
+      if server < 0 || visited[server] {
+        server = nextServer
+        nextServer++
+      }
+      if !visited[server] {
+        visited[server] = true
+        if f(server) {
+          ck.leader = server
+          return
+        }
+      }
+    }
+  }
 }
 
 //
@@ -37,9 +62,24 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
-
-	// You will have to modify this function.
-	return ""
+  args := GetArgs{
+    Key: key,
+  }
+  var reply GetReply
+  ck.tryAllServers(func(server int) bool {
+    reply = GetReply{}
+    ok := ck.servers[server].Call("KVServer.Get", &args, &reply)
+    if ok {
+      if reply.WrongLeader {
+        ck.leader = reply.Leader
+        return false
+      } else if reply.Err == "" {
+        return true
+      }
+    }
+    return false
+  })
+  return reply.Value
 }
 
 //
@@ -53,7 +93,26 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	// You will have to modify this function.
+  args := PutAppendArgs{
+    Key: key,
+    Value: value,
+    Op: op,
+    Client: ck.client,
+    Seq: atomic.AddUint64(&ck.seq, 1),
+  }
+  ck.tryAllServers(func(server int) bool {
+    reply := PutAppendReply{}
+    ok := ck.servers[server].Call("KVServer.PutAppend", &args, &reply)
+    if ok {
+      if reply.WrongLeader {
+        ck.leader = reply.Leader
+        return false
+      } else if reply.Err == "" {
+        return true
+      }
+    }
+    return false
+  })
 }
 
 func (ck *Clerk) Put(key string, value string) {

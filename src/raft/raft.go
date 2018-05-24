@@ -38,7 +38,7 @@ func min(a, b int) int {
 
 func (rf *Raft)assert(cond bool, format string, v ...interface {}) {
   if !cond {
-    panic(fmt.Sprintf(format, v...) + fmt.Sprintf(" Rack struct: %+v", rf))
+    panic(fmt.Sprintf(format, v...) + fmt.Sprintf(" Rack struct: %+v", *rf))
   }
 }
 
@@ -188,6 +188,11 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 // Receiver's handler
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *RequestReply) {
+  rf.Log("Got AppendEntriesArgs %+v", *args)
+  if args == nil {
+    rf.Log("Nil input args for AppendEntriesArgs")
+    return
+  }
   termUpdated := rf.updateTerm(args.Term, true)
 
   defer func() {
@@ -236,8 +241,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *RequestReply) {
       cdata.log[args.PrevLogIndex + matchedLen + 1].Term == args.Entries[matchedLen].Term {
     matchedLen++
   }
+  // Don't truncate if there is not conflict. 'cdata.log' may be longer than
+  // the leader's log represented by this request because this request may be
+  // delayed by the network and have stale data.
   modified := false
-  if args.PrevLogIndex + matchedLen + 1 < len(cdata.log) {
+  if matchedLen < len(args.Entries) && args.PrevLogIndex + matchedLen + 1 < len(cdata.log) {
     cdata.log = cdata.log[:args.PrevLogIndex + matchedLen + 1]
     modified = true
   }
@@ -254,6 +262,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *RequestReply) {
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *RequestReply) bool {
+  rf.Log("Sent AppendEntriesArgs %+v to peer %d", *args, server)
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
@@ -268,6 +277,9 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
   if cdata.role != Leader {
     return
   }
+  defer func() {
+    rf.notifyQ<-true
+  }()
   isLeader = true
   index = len(cdata.log)
   term = cdata.currentTerm
@@ -295,6 +307,10 @@ func (rf *Raft) Kill() {
   rf.applierWakeup<-false
   rf.notifyQ<-false
   rf.wg.Wait()
+}
+
+func (rf *Raft) GetLeader() int {
+  return rf.leader
 }
 
 func getElectionTimeout() time.Duration {
@@ -424,6 +440,7 @@ func (rf *Raft)onLeader() {
     rf.nextIndex = make([]int, len(rf.peers))
     rf.matchIndex = make([]int, len(rf.peers))
     rf.RLock()
+    rf.leader = rf.me
     logLen := len(rf.cdata.log)
     rf.RUnlock()
     for i, _ := range rf.nextIndex {
@@ -431,7 +448,9 @@ func (rf *Raft)onLeader() {
       rf.matchIndex[i] = 0
     }
   }()
-  rf.replicateLogs()
+  for rf.getRole() == Leader {
+    rf.replicateLogs()
+  }
 }
 
 func (rf *Raft) replicateLogs() {
@@ -445,16 +464,17 @@ func (rf *Raft) replicateLogs() {
   }()
   var sendRecursively func(peer int)
   sendRecursively = func (peer int) {
-    rf.Log("Send Peer %d nextIndex %d", peer, rf.nextIndex[peer])
-    args := AppendEntriesArgs{
-      LeaderId: rf.me,
-      // Stale value also works
-      LeaderCommit: rf.commitIndex,
-      PrevLogIndex: rf.nextIndex[peer] - 1,
-    }
+    var args AppendEntriesArgs
     prepareArgs := func() bool {
       rf.RLock()
       defer rf.RUnlock()
+      rf.Log("Send Peer %d nextIndex %d", peer, rf.nextIndex[peer])
+      args = AppendEntriesArgs{
+        LeaderId: rf.me,
+        // Stale value also works
+        LeaderCommit: rf.commitIndex,
+        PrevLogIndex: rf.nextIndex[peer] - 1,
+      }
       cdata := &rf.cdata
       if cdata.role != Leader {
         return false
@@ -531,14 +551,14 @@ func (rf *Raft) replicateLogs() {
     }
     conflictingTerm, firstIndex := reply.ConflictingTerm, reply.FirstLogIndex
 
-    rf.RLock()
+    rf.Lock()
     defer func() {
-      rf.RUnlock()
       if next != rf.nextIndex[peer] {
         rf.Log("Updated peer %d next index from %d to %d",
           peer, rf.nextIndex[peer], next)
         rf.nextIndex[peer] = next
       }
+      rf.Unlock()
     }()
 
     cdata := &rf.cdata
@@ -580,7 +600,7 @@ func (rf *Raft) replicateLogs() {
     result := rf.MultiWait(replyChan, 0)
     switch {
       case result.timeout:
-        rf.Log("Timeout!")
+        rf.assert(false, "Timeout is impossible")
         // Start over
         return
       case result.interrupted:
@@ -654,8 +674,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
   rand.Seed(int64(time.Now().Nanosecond()))
   // rand.Seed(int64(1234567))
+  rf.wg.Add(1)
   go func() {
-    rf.wg.Add(1)
     defer rf.Log("Applier is exiting.")
     defer rf.wg.Done()
     for {
@@ -670,6 +690,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
         }
         term := 0
         rf.RLock()
+        rf.assert(rf.lastApplied + 1 < len(rf.cdata.log),
+          "last applied too large %d > %d.", rf.lastApplied, len(rf.cdata.log))
         msg.Command = rf.cdata.log[rf.lastApplied + 1].Cmd
         term = rf.cdata.log[rf.lastApplied + 1].Term
         rf.RUnlock()
@@ -687,14 +709,15 @@ func Make(peers []*labrpc.ClientEnd, me int,
     }
   }()
 
+  rf.wg.Add(1)
   go func() {
-    rf.wg.Add(1)
     defer rf.Log("Exiting main loop")
     defer rf.wg.Done()
     role := -1
     for {
-      newRole := rf.cdata.role
-      rf.Log("Became role %d at term %d", newRole, rf.cdata.currentTerm)
+      newRole := rf.getRole()
+      term, _ := rf.GetState()
+      rf.Log("Became role %d at term %d", newRole, term)
       role = newRole
       callback, ok := rf.callbackMap[role]
       if !ok {

@@ -13,7 +13,7 @@ import (
 
 const (
   Debug = 0
-  CommitTimeout = time.Duration(200) * time.Millisecond
+  CommitTimeout = time.Duration(500) * time.Millisecond
   Success = 0
   ErrWrongLeader = 1
   ErrCommitTimeout = 2
@@ -55,13 +55,26 @@ func (kv *KVServer) commitOne(cmd Cmd) int {
     kv.rf.Log("Committing log item: %+v at index %d at term %d status: %d.\n",
       cmd, logIndex, term, ret)
   }()
-  select {
-    case <-time.After(CommitTimeout):
-    case <-kv.callerCh:
-  }
-  rfTerm, leader := kv.rf.GetState()
-  if term == rfTerm && leader && kv.lastAppliedIndex >= logIndex {
-    ret = Success
+  to := time.After(CommitTimeout)
+  for {
+    timeout := false
+    select {
+      case <-to:
+        timeout = true
+      case <-kv.callerCh:
+        kv.rf.Log("Waken up")
+    }
+    rfTerm, leader := kv.rf.GetState()
+    if term != rfTerm || !leader {
+      return ret
+    }
+    if kv.lastAppliedIndex >= logIndex {
+      ret = Success
+      return ret
+    }
+    if timeout {
+      break
+    }
   }
   return ret
 }
@@ -175,14 +188,15 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
         return false
       }
       defer func() {
+        kv.lastAppliedIndex = msg.CommandIndex
         if _, isLeader := kv.rf.GetState(); isLeader {
+          kv.rf.Log("Waking up the caller.")
           kv.callerCh<-true
         }
       }()
       if cmd.CmdType == OpGet {
         return true
       }
-      kv.lastAppliedIndex = msg.CommandIndex
       if cmd.Seq <= kv.clientLastSeq[cmd.ClientId] {
         dupCmds++
         return true

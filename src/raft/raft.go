@@ -278,7 +278,7 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
     return
   }
   defer func() {
-    rf.notifyQ<-true
+    // rf.notifyQ<-true
   }()
   isLeader = true
   index = len(cdata.log)

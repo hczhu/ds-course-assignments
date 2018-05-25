@@ -49,6 +49,13 @@ func (kv *KVServer) commitOne(cmd Cmd) int {
   if !isLeader {
     return ErrWrongLeader
   }
+  kv.RLock()
+  lastSeq := kv.clientLastSeq[cmd.ClientId]
+  kv.RUnlock()
+  if cmd.Seq <= lastSeq {
+    kv.rf.Log("Duplicate cmd: %+v", cmd)
+    return Success
+  }
   ret := ErrCommitTimeout
   defer func() {
     kv.rf.Log("Committing log item: %+v at index %d at term %d status: %d.\n",
@@ -81,6 +88,8 @@ func (kv *KVServer) commitOne(cmd Cmd) int {
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
   cmd := Cmd{
     CmdType: OpGet,
+    Seq: args.Seq,
+    ClientId: args.Client,
   }
   ret := kv.commitOne(cmd)
   if ret == ErrWrongLeader {
@@ -196,20 +205,18 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
           kv.callerCh<-true
         }
       }()
-      if cmd.CmdType == OpGet {
-        return true
-      }
       if cmd.Seq <= kv.clientLastSeq[cmd.ClientId] {
         dupCmds++
         return true
       }
-      kv.clientLastSeq[cmd.ClientId] = cmd.Seq
       kv.Lock()
+      kv.clientLastSeq[cmd.ClientId] = cmd.Seq
       switch cmd.CmdType {
         case OpPut:
           kv.kvMap[cmd.Key] = cmd.Value
         case OpAppend:
           kv.kvMap[cmd.Key] += cmd.Value
+        case OpGet:
       }
       kv.Unlock()
       kv.rf.Log("Applied %+v\n", msg)

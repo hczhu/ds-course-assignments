@@ -4,7 +4,7 @@ import "labrpc"
 import "crypto/rand"
 import "math/big"
 import "sync/atomic"
-// import "fmt"
+import "fmt"
 
 
 type Clerk struct {
@@ -64,6 +64,8 @@ func (ck *Clerk) tryAllServers(f func(serverId int)bool) {
 func (ck *Clerk) Get(key string) string {
   args := GetArgs{
     Key: key,
+    Client: ck.client,
+    Seq: atomic.AddUint64(&ck.seq, 1),
   }
   var reply GetReply
   ck.tryAllServers(func(server int) bool {
@@ -74,9 +76,11 @@ func (ck *Clerk) Get(key string) string {
         ck.leader = reply.Leader
         return false
       }
-      if reply.Err == "" {
+      if reply.Err == "" || reply.Err == ErrNoKey {
         return true
       }
+    } else {
+      fmt.Printf("RPC timeout: %+v\n", args)
     }
     return false
   })

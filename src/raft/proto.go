@@ -37,6 +37,8 @@ type CoreData struct {
   // The first entry is a sentinel
   log []LogEntry
   role int
+
+  numCompactedLogs int
 }
 
 // A Go object implementing a single Raft peer.
@@ -71,6 +73,7 @@ type Raft struct {
   callbackMap map[int]func()
 
   live bool
+	maxStateSize int
 }
 
 // example RequestVote RPC arguments structure.

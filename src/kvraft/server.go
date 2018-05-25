@@ -170,6 +170,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+  kv.rf.SetMaxStateSize(maxraftstate)
 
   kv.lastAppliedIndex = 0
   kv.kvMap = make(map[string]string)

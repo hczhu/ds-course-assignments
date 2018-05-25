@@ -628,6 +628,10 @@ func (rf *Raft) replicateLogs() {
   }
 }
 
+func (rf *Raft) SetMaxStateSize(size int) {
+  rf.maxStateSize = size
+}
+
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this

@@ -253,11 +253,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *RequestReply) {
     cdata.log = append(cdata.log, args.Entries[matchedLen])
     modified = true
   }
-  if modified {
-    rf.persist()
-  }
-  if args.LeaderCommit > rf.commitIndex {
-    rf.commitIndex = min(args.LeaderCommit, len(cdata.log) - 1)
+  newCommitIndex := min(args.LeaderCommit, len(cdata.log) - 1)
+  if newCommitIndex > rf.commitIndex {
+    rf.commitIndex = newCommitIndex
+    if modified {
+      rf.persist()
+    }
   }
 }
 
@@ -288,7 +289,7 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
     Cmd: command,
   }
   cdata.log = append(cdata.log, entry)
-  rf.persist()
+  // rf.persist()
   rf.Log("Appended entry %+v at %d.", entry, index)
   return
 }
@@ -510,17 +511,22 @@ func (rf *Raft) replicateLogs() {
       rf.Log("Got a stale reply: %+v", reply)
       return true
     }
-
+    rf.matchIndex[peer] = newMatchIndex
+    rf.nextIndex[peer] = newMatchIndex + 1
+    N := rf.matchIndex[peer]
+    if N <= rf.commitIndex {
+      return true
+    }
+    isCurrentTerm := false
     rf.RLock()
-    defer rf.RUnlock()
     cdata := &rf.cdata
     if cdata.role != Leader {
       return false
     }
-    rf.matchIndex[peer] = newMatchIndex
-    rf.nextIndex[peer] = newMatchIndex + 1
-    N := rf.matchIndex[peer]
-    if N > rf.commitIndex && cdata.log[N].Term == cdata.currentTerm {
+    isCurrentTerm = N < len(cdata.log) && cdata.log[N].Term == cdata.currentTerm
+    rf.RUnlock()
+
+    if isCurrentTerm {
       numGoodPeers := 1
       for p, match := range rf.matchIndex {
         if p == rf.me {
@@ -530,6 +536,9 @@ func (rf *Raft) replicateLogs() {
           numGoodPeers++
           if 2 * numGoodPeers > len(rf.peers) {
             rf.commitIndex = N
+            rf.RLock()
+            rf.persist()
+            rf.RUnlock()
             if rf.commitIndex > rf.lastApplied {
               rf.applierWakeup<-true
             }

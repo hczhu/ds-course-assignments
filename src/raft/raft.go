@@ -537,6 +537,9 @@ func (rf *Raft) replicateLogs() {
           if 2 * numGoodPeers > len(rf.peers) {
             rf.commitIndex = N
             rf.RLock()
+            if rf.cdata.role != Leader {
+              return false
+            }
             rf.persist()
             rf.RUnlock()
             if rf.commitIndex > rf.lastApplied {

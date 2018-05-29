@@ -26,6 +26,12 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
+type Snapshot struct {
+  LastAppliedIndex int
+  KvMap map[string]string
+  ClientLastSeq map[int64]uint64
+}
+
 type KVServer struct {
 	sync.RWMutex
 	me      int
@@ -147,6 +153,20 @@ func (kv *KVServer) Kill() {
   kv.wg.Wait()
 }
 
+func (kv *KVServer) snapshot() []byte {
+  kv.Lock()
+  ss := Snapshot{
+    LastAppliedIndex: kv.lastAppliedIndex,
+    KvMap: kv.kvMap,
+    ClientLastSeq: kv.clientLastSeq,
+  }
+  kv.Unlock()
+  w := new(bytes.Buffer)
+  e := labgob.NewEncoder(ss)
+  e.Encode(reply)
+	return w.Bytes()
+}
+
 //
 // servers[] contains the ports of the set of
 // servers that will cooperate via Raft to
@@ -199,7 +219,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
         return false
       }
       defer func() {
-        kv.lastAppliedIndex = msg.CommandIndex
         if _, isLeader := kv.rf.GetState(); isLeader {
           kv.rf.Log("Waking up the caller.")
           kv.callerCh<-true
@@ -210,7 +229,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
         return true
       }
       kv.Lock()
-      kv.clientLastSeq[cmd.ClientId] = cmd.Seq
       switch cmd.CmdType {
         case OpPut:
           kv.kvMap[cmd.Key] = cmd.Value
@@ -218,6 +236,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
           kv.kvMap[cmd.Key] += cmd.Value
         case OpGet:
       }
+      kv.clientLastSeq[cmd.ClientId] = cmd.Seq
+      kv.lastAppliedIndex = msg.CommandIndex
       kv.Unlock()
       kv.rf.Log("Applied %+v\n", msg)
       return true

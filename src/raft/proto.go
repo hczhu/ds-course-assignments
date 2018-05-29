@@ -32,13 +32,26 @@ type WakeupChan chan bool
 
 type CoreData struct {
   // For all servers
-  currentTerm int
-  votedFor int
+  CurrentTerm int
+  VotedFor int
   // The first entry is a sentinel
-  log []LogEntry
-  role int
+  Log []LogEntry
+  Role int
 
-  numCompactedLogs int
+  // Corresponds to 'log[0]'
+  LastCompactedIndex int
+}
+
+func (cdata *CoreData) LogEntry(idx int) *LogEntry {
+  return &cdata.Log[idx - cdata.LastCompactedIndex]
+}
+
+func (cdata *CoreData) LastLogIndex() int {
+  return len(cdata.Log) -1  + cdata.LastCompactedIndex
+}
+
+func (cdata *CoreData) LastLogTerm() int {
+  return cdata.LogEntry(cdata.LastLogIndex()).Term
 }
 
 // A Go object implementing a single Raft peer.
@@ -74,6 +87,8 @@ type Raft struct {
 
   live bool
 	maxStateSize int
+
+  snapshot Bytes
 }
 
 // example RequestVote RPC arguments structure.

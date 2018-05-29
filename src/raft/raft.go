@@ -56,13 +56,13 @@ func (rf *Raft) Log(format string, v ...interface {}) {
 func (rf *Raft) GetState() (term int, isLeader bool) {
   rf.RLock()
   defer rf.RUnlock()
-	return rf.cdata.currentTerm, rf.cdata.role == Leader
+	return rf.cdata.CurrentTerm, rf.cdata.Role == Leader
 }
 
 func (rf *Raft) getRole() int {
   rf.RLock()
   defer rf.RUnlock()
-	return rf.cdata.role
+	return rf.cdata.Role
 }
 
 //
@@ -74,44 +74,35 @@ func (rf *Raft) persist() {
   if !gPersist {
     return
   }
-  switch rf.cdata.role {
+  switch rf.cdata.Role {
     case Follower:
     case Candidate:
       fallthrough
     case Leader:
-      rf.assert(rf.cdata.votedFor == rf.me, "A non-follower should vote for itself")
+      rf.assert(rf.cdata.VotedFor == rf.me, "A non-follower should vote for itself")
   }
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-  e.Encode(rf.cdata.currentTerm)
-	e.Encode(rf.cdata.votedFor)
-  e.Encode(rf.cdata.log)
+  e.Encode(rf.cdata)
 	data := w.Bytes()
-	rf.persister.SaveRaftState(data)
+	rf.persister.SaveStateAndSnapshot(data, rf.snapshot)
 }
 
 //
 // restore previously persisted state.
 //
-func (rf *Raft) readPersist(data []byte) {
+func (rf *Raft) readPersist(data []byte, snapshot Bytes) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 
-  var currentTerm, votedFor int
-  var log []LogEntry
-  if d.Decode(&currentTerm) != nil ||
-      d.Decode(&votedFor) != nil ||
-      d.Decode(&log) != nil {
-   fmt.Println("Failed to restore the persisted data.")
-  } else {
-    cdata := &rf.cdata
-    cdata.currentTerm = currentTerm
-    cdata.votedFor = votedFor
-    cdata.log = log
-  }
+  cdata := CoreData{}
+  err := d.Decode(&cdata)
+  rf.assert(err == nil, "Failed to restore the persisted data with error %+v.", err)
+  rf.cdata = cdata
+  rf.snapshot = snapshot
 }
 
 func encodeReply(reply RequestReply) Bytes {
@@ -132,10 +123,10 @@ func (rf *Raft) updateTerm(peerTerm int, notify bool) bool {
   updated := false
   rf.Lock()
   cdata := &rf.cdata
-  if cdata.currentTerm < peerTerm {
-    cdata.role = Follower
-    cdata.currentTerm = peerTerm
-    cdata.votedFor = -1
+  if cdata.CurrentTerm < peerTerm {
+    cdata.Role = Follower
+    cdata.CurrentTerm = peerTerm
+    cdata.VotedFor = -1
     updated = true
     rf.persist()
   }
@@ -160,25 +151,25 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestReply) {
   rf.Lock()
   defer rf.Unlock()
   cdata := &rf.cdata
-  reply.Term = cdata.currentTerm
+  reply.Term = cdata.CurrentTerm
   reply.Peer = rf.me
   reply.Success = false
-  if args.Term < cdata.currentTerm ||
-      (cdata.votedFor >=0 && cdata.votedFor != args.CandidateId) {
+  if args.Term < cdata.CurrentTerm ||
+      (cdata.VotedFor >=0 && cdata.VotedFor != args.CandidateId) {
     return
   }
   // This server must be a follower
-  rf.assert(cdata.role == Follower, "Should be a follower")
-  lastTerm, lastIndex := cdata.log[len(cdata.log) - 1].Term, len(cdata.log) - 1
+  rf.assert(cdata.Role == Follower, "Should be a follower")
+  lastTerm, lastIndex := cdata.LastLogTerm(), cdata.LastLogIndex()
   if lastTerm > args.LastLogTerm ||
       (lastTerm == args.LastLogTerm && lastIndex > args.LastLogIndex) {
     return
   }
   reply.Success = true
   // Can the following steps be done asynchronously (after returning the RPC)?
-  cdata.votedFor = args.CandidateId
+  cdata.VotedFor = args.CandidateId
   rf.persist()
-  rf.Log("Voted for %d during term %d", cdata.votedFor, cdata.currentTerm)
+  rf.Log("Voted for %d during term %d", cdata.VotedFor, cdata.CurrentTerm)
 }
 
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestReply) bool {
@@ -213,8 +204,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *RequestReply) {
     }
   }()
   cdata := &rf.cdata
-  reply.Term = cdata.currentTerm
-  if args.Term < cdata.currentTerm {
+  reply.Term = cdata.CurrentTerm
+  if args.Term < cdata.CurrentTerm {
     // out-of-date leader
     return
   }
@@ -222,38 +213,39 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *RequestReply) {
   shouldResetElectionTimer = !termUpdated
   // A heartbeat must go through all the following steps as well
   rf.leader = args.LeaderId
-  if args.PrevLogIndex >= len(cdata.log) {
+  if args.PrevLogIndex > cdata.LastLogIndex() {
     reply.ConflictingTerm = -1
-    reply.FirstLogIndex = len(cdata.log)
+    reply.FirstLogIndex = cdata.LastLogIndex() + 1
     return
   }
-  if args.PrevLogTerm != cdata.log[args.PrevLogIndex].Term {
-    reply.ConflictingTerm = cdata.log[args.PrevLogIndex].Term;
+  if args.PrevLogTerm != cdata.LogEntry(args.PrevLogIndex).Term {
+    reply.ConflictingTerm = cdata.LogEntry(args.PrevLogIndex).Term;
     for reply.FirstLogIndex = args.PrevLogIndex;
-        cdata.log[reply.FirstLogIndex - 1].Term == reply.ConflictingTerm;
+        reply.FirstLogIndex > 0 &&
+        cdata.LogEntry(reply.FirstLogIndex - 1).Term == reply.ConflictingTerm;
         reply.FirstLogIndex-- {}
     return
   }
   reply.Success = true
   matchedLen := 0
   for matchedLen < len(args.Entries) &&
-      args.PrevLogIndex + matchedLen + 1 < len(cdata.log) &&
-      cdata.log[args.PrevLogIndex + matchedLen + 1].Term == args.Entries[matchedLen].Term {
+      args.PrevLogIndex + matchedLen + 1 <= cdata.LastLogIndex() &&
+      cdata.LogEntry(args.PrevLogIndex + matchedLen + 1).Term == args.Entries[matchedLen].Term {
     matchedLen++
   }
-  // Don't truncate if there is not conflict. 'cdata.log' may be longer than
+  // Don't truncate if there is not conflict. 'cdata.Log' may be longer than
   // the leader's log represented by this request because this request may be
   // delayed by the network and have stale data.
   modified := false
-  if matchedLen < len(args.Entries) && args.PrevLogIndex + matchedLen + 1 < len(cdata.log) {
-    cdata.log = cdata.log[:args.PrevLogIndex + matchedLen + 1]
+  if matchedLen < len(args.Entries) && args.PrevLogIndex + matchedLen + 1 <= cdata.LastLogIndex() {
+    cdata.Log = cdata.Log(:args.PrevLogIndex + matchedLen + 1 - cdata.LastCompactedIndex)
     modified = true
   }
   for ;matchedLen < len(args.Entries); matchedLen++ {
-    cdata.log = append(cdata.log, args.Entries[matchedLen])
+    cdata.Log = append(cdata.Log, args.Entries[matchedLen])
     modified = true
   }
-  newCommitIndex := min(args.LeaderCommit, len(cdata.log) - 1)
+  newCommitIndex := min(args.LeaderCommit, cdata.LastLogIndex())
   if newCommitIndex > rf.commitIndex {
     rf.commitIndex = newCommitIndex
     if modified {
@@ -275,20 +267,20 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
   rf.Lock()
   defer rf.Unlock()
   cdata := &rf.cdata
-  if cdata.role != Leader {
+  if cdata.Role != Leader {
     return
   }
   defer func() {
     // rf.notifyQ<-true
   }()
   isLeader = true
-  index = len(cdata.log)
-  term = cdata.currentTerm
+  term = cdata.CurrentTerm
   entry := LogEntry{
     Term: term,
     Cmd: command,
   }
-  cdata.log = append(cdata.log, entry)
+  cdata.Log = append(cdata.Log, entry)
+  index = cdata.LastLogIndex()
   // rf.persist()
   rf.Log("Appended entry %+v at %d.", entry, index)
   return
@@ -354,9 +346,9 @@ func (rf *Raft)onFollower() {
   switch {
     case result.timeout:
       rf.Lock()
-      rf.cdata.role = Candidate
-      // cdata.currentTerm++
-      rf.cdata.votedFor = rf.me
+      rf.cdata.Role = Candidate
+      // cdata.CurrentTerm++
+      rf.cdata.VotedFor = rf.me
       // Don't need to persist
       rf.Unlock()
     case result.interrupted:
@@ -364,7 +356,7 @@ func (rf *Raft)onFollower() {
 }
 
 func (rf *Raft) onCandidate() {
-  // rf.Log("Became a candidate at term %d", rf.cdata.currentTerm)
+  // rf.Log("Became a candidate at term %d", rf.cdata.CurrentTerm)
   timeoutCh := time.After(getElectionTimeout())
   var args RequestVoteArgs
   prepareCandidacy := func() bool {
@@ -372,19 +364,19 @@ func (rf *Raft) onCandidate() {
     defer rf.Unlock()
     cdata := &rf.cdata
 
-    if cdata.role != Candidate {
+    if cdata.Role != Candidate {
       return false
     }
-    cdata.currentTerm++
-    cdata.votedFor = rf.me
+    cdata.CurrentTerm++
+    cdata.VotedFor = rf.me
     // Don't need to persist
     // rf.persist()
     // rf.Log("%+v", cdata)
     args = RequestVoteArgs{
-      Term: cdata.currentTerm,
+      Term: cdata.CurrentTerm,
       CandidateId: rf.me,
-      LastLogIndex: len(cdata.log) - 1,
-      LastLogTerm: cdata.log[len(cdata.log) - 1].Term,
+      LastLogIndex: cdata.LastLogIndex(),
+      LastLogTerm: cdata.LastLogTerm(),
     }
     return true
   }
@@ -430,8 +422,8 @@ func (rf *Raft) onCandidate() {
   }
   rf.RLock()
   defer rf.RUnlock()
-  if rf.cdata.role == Candidate {
-    rf.cdata.role = Leader
+  if rf.cdata.Role == Candidate {
+    rf.cdata.Role = Leader
     rf.persist()
   }
 }
@@ -442,7 +434,7 @@ func (rf *Raft)onLeader() {
     rf.matchIndex = make([]int, len(rf.peers))
     rf.RLock()
     rf.leader = rf.me
-    logLen := len(rf.cdata.log)
+    logLen := len(rf.cdata.Log)
     rf.RUnlock()
     for i, _ := range rf.nextIndex {
       rf.nextIndex[i] = logLen
@@ -461,7 +453,7 @@ func (rf *Raft) replicateLogs() {
   numReplies := 0
   defer func() {
     rf.Log("Sent %d RPCs and got %d replies during one replicateLogs call at term %d.",
-      numRPCs, numReplies, rf.cdata.currentTerm)
+      numRPCs, numReplies, rf.cdata.CurrentTerm)
   }()
   var sendRecursively func(peer int)
   sendRecursively = func (peer int) {
@@ -477,12 +469,12 @@ func (rf *Raft) replicateLogs() {
         PrevLogIndex: rf.nextIndex[peer] - 1,
       }
       cdata := &rf.cdata
-      if cdata.role != Leader {
+      if cdata.Role != Leader {
         return false
       }
-      args.Term = cdata.currentTerm
-      args.PrevLogTerm = cdata.log[rf.nextIndex[peer] - 1].Term
-      args.Entries = cdata.log[rf.nextIndex[peer]:]
+      args.Term = cdata.CurrentTerm
+      args.PrevLogTerm = cdata.LogEntry(rf.nextIndex[peer) - 1].Term
+      args.Entries = cdata.LogEntry(rf.nextIndex[peer):]
       return true
     }
     if !prepareArgs() {
@@ -520,10 +512,10 @@ func (rf *Raft) replicateLogs() {
     isCurrentTerm := false
     rf.RLock()
     cdata := &rf.cdata
-    if cdata.role != Leader {
+    if cdata.Role != Leader {
       return false
     }
-    isCurrentTerm = N < len(cdata.log) && cdata.log[N].Term == cdata.currentTerm
+    isCurrentTerm = N < len(cdata.Log) && cdata.LogEntry(N).Term == cdata.CurrentTerm
     rf.RUnlock()
 
     if isCurrentTerm {
@@ -537,7 +529,7 @@ func (rf *Raft) replicateLogs() {
           if 2 * numGoodPeers > len(rf.peers) {
             rf.commitIndex = N
             rf.RLock()
-            if rf.cdata.role != Leader {
+            if rf.cdata.Role != Leader {
               return false
             }
             rf.persist()
@@ -574,7 +566,7 @@ func (rf *Raft) replicateLogs() {
     }()
 
     cdata := &rf.cdata
-    if cdata.role != Leader {
+    if cdata.Role != Leader {
       rf.Log("Not the leader any more.")
       return false
     }
@@ -586,11 +578,11 @@ func (rf *Raft) replicateLogs() {
     }
 
     for next--; next > firstIndex; next-- {
-      if cdata.log[next - 1].Term == conflictingTerm {
+      if cdata.LogEntry(next - 1).Term == conflictingTerm {
         return true
       }
     }
-    for next > 0 && cdata.log[next - 1].Term == conflictingTerm {
+    for next > 0 && cdata.LogEntry(next - 1).Term == conflictingTerm {
       next--
     }
     return true
@@ -644,6 +636,18 @@ func (rf *Raft) SetMaxStateSize(size int) {
   rf.maxStateSize = size
 }
 
+func (rf *Raft) CompactLogs(snapshot Bytes, lastAppliedIndex int) {
+  rf.Lock()
+  defer rf.Unlock()
+  cdata := &rf.cdata
+  rf.assert(lastAppliedIndex >= cdata.LastCompactedIndex,
+    "Snapshot last applied index %d < already compacted last index %d",
+    lastAppliedIndex, cdata.LastCompactedIndex)
+  cdata.Log = cdata.LogEntry(lastAppliedIndex - cdata.LastCompactedIndex:)
+  rf.snapshot = snapshot
+  cdata.LastCompactedIndex = lastAppliedIndex
+}
+
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -674,11 +678,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
   rf.live = true
 
   rf.cdata = CoreData {
-    currentTerm: 1,
-    votedFor: -1,
-    // The first entry is a sentinel.
-    log: make([]LogEntry, 1),
-    role: Follower,
+    CurrentTerm: 1,
+    VotedFor: -1,
+    // THe first entry is a sentinel.
+    Log: make([]LogEntry, 1),
+    Role: Follower,
+    LastCompactedIndex: 0,
   }
 
   rf.callbackMap = map[int]func() {
@@ -688,7 +693,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
   }
 
 	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
+	rf.readPersist(persister.ReadRaftState(), persister.ReadSnapshot())
   rand.Seed(int64(time.Now().Nanosecond()))
   // rand.Seed(int64(1234567))
   rf.wg.Add(1)
@@ -707,10 +712,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
         }
         term := 0
         rf.RLock()
-        rf.assert(rf.lastApplied + 1 < len(rf.cdata.log),
-          "last applied too large %d > %d.", rf.lastApplied, len(rf.cdata.log))
-        msg.Command = rf.cdata.log[rf.lastApplied + 1].Cmd
-        term = rf.cdata.log[rf.lastApplied + 1].Term
+        rf.assert(rf.lastApplied + 1 <= rf.cdata.LastLogIndex(),
+          "last applied too large %d > %d.", rf.lastApplied, rf.cdata.LastLogIndex())
+        msg.Command = rf.cdata.LogEntry(rf.lastApplied + 1).Cmd
+        term = rf.cdata.LogEntry(rf.lastApplied + 1).Term
         rf.RUnlock()
         rf.Log("Applied %+v at term %d", msg, term)
         select {

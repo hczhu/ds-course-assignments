@@ -7,6 +7,7 @@ import (
 	"raft"
 	"sync"
   "time"
+  "bytes"
   // "fmt"
   // "sync/atomic"
 )
@@ -153,20 +154,6 @@ func (kv *KVServer) Kill() {
   kv.wg.Wait()
 }
 
-func (kv *KVServer) snapshot() []byte {
-  kv.Lock()
-  ss := Snapshot{
-    LastAppliedIndex: kv.lastAppliedIndex,
-    KvMap: kv.kvMap,
-    ClientLastSeq: kv.clientLastSeq,
-  }
-  kv.Unlock()
-  w := new(bytes.Buffer)
-  e := labgob.NewEncoder(ss)
-  e.Encode(reply)
-	return w.Bytes()
-}
-
 //
 // servers[] contains the ports of the set of
 // servers that will cooperate via Raft to
@@ -212,8 +199,38 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
     dupCmds := 0
     defer kv.rf.Log("Exiting KV applier with %d duplicate cmds\n.", dupCmds)
     defer kv.wg.Done()
+    snapshot := func() []byte{
+      ss := Snapshot{
+        LastAppliedIndex: kv.lastAppliedIndex,
+        KvMap: kv.kvMap,
+        ClientLastSeq: kv.clientLastSeq,
+      }
+      w := new(bytes.Buffer)
+      e := labgob.NewEncoder(w)
+      e.Encode(ss)
+	    return w.Bytes()
+    }
+    installSnapshot := func(data []byte) {
+	    r := bytes.NewBuffer(data)
+	    d := labgob.NewDecoder(r)
+      ss := Snapshot{}
+      d.Decode(&ss)
+      kv.lastAppliedIndex = ss.LastAppliedIndex
+      kv.kvMap = ss.KvMap
+      kv.clientLastSeq = ss.ClientLastSeq
+      kv.rf.Log("Install snapshot with last applied index: %d",
+        ss.LastAppliedIndex)
+    }
+
+    // kv.maxraftstate = 1
     run := func() bool {
       msg := <-kv.applyCh
+      if msg.InstallSnapshot {
+        kv.Lock()
+        defer kv.Unlock()
+        installSnapshot(msg.Command.(raft.Bytes))
+        return true
+      }
       cmd := msg.Command.(Cmd)
       if cmd.Quit {
         return false
@@ -224,22 +241,30 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
           kv.callerCh<-true
         }
       }()
+      kv.Lock()
       if cmd.Seq <= kv.clientLastSeq[cmd.ClientId] {
         dupCmds++
-        return true
+      } else {
+        switch cmd.CmdType {
+          case OpPut:
+            kv.kvMap[cmd.Key] = cmd.Value
+          case OpAppend:
+            kv.kvMap[cmd.Key] += cmd.Value
+          case OpGet:
+        }
+        kv.clientLastSeq[cmd.ClientId] = cmd.Seq
       }
-      kv.Lock()
-      switch cmd.CmdType {
-        case OpPut:
-          kv.kvMap[cmd.Key] = cmd.Value
-        case OpAppend:
-          kv.kvMap[cmd.Key] += cmd.Value
-        case OpGet:
-      }
-      kv.clientLastSeq[cmd.ClientId] = cmd.Seq
       kv.lastAppliedIndex = msg.CommandIndex
-      kv.Unlock()
       kv.rf.Log("Applied %+v\n", msg)
+      var ss []byte
+      if kv.maxraftstate > 0 && kv.rf.RaftStateSize() > kv.maxraftstate {
+        ss = snapshot()
+      }
+      kv.Unlock()
+      if ss != nil {
+        kv.rf.Log("Compacting raft logs...")
+        kv.rf.CompactLogs(ss, kv.lastAppliedIndex)
+      }
       return true
     }
     for run() { }

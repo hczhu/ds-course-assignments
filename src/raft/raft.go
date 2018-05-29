@@ -36,7 +36,7 @@ func min(a, b int) int {
   return b
 }
 
-func (rf *Raft)assert(cond bool, format string, v ...interface {}) {
+func (rf *Raft) assert(cond bool, format string, v ...interface {}) {
   if !cond {
     panic(fmt.Sprintf(format, v...) + fmt.Sprintf(" Rack struct: %+v", *rf))
   }
@@ -238,25 +238,77 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *RequestReply) {
   // delayed by the network and have stale data.
   modified := false
   if matchedLen < len(args.Entries) && args.PrevLogIndex + matchedLen + 1 <= cdata.LastLogIndex() {
-    cdata.Log = cdata.Log(:args.PrevLogIndex + matchedLen + 1 - cdata.LastCompactedIndex)
+    cdata.Log = cdata.Log[:args.PrevLogIndex + matchedLen + 1 - cdata.LastCompactedIndex]
     modified = true
   }
   for ;matchedLen < len(args.Entries); matchedLen++ {
     cdata.Log = append(cdata.Log, args.Entries[matchedLen])
     modified = true
   }
+  if modified {
+    rf.persist()
+  }
   newCommitIndex := min(args.LeaderCommit, cdata.LastLogIndex())
   if newCommitIndex > rf.commitIndex {
     rf.commitIndex = newCommitIndex
-    if modified {
-      rf.persist()
-    }
   }
+}
+
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *RequestReply) {
+  termUpdated := rf.updateTerm(args.Term, true)
+
+  reply.Peer = rf.me
+  reply.Success = false
+  shouldResetElectionTimer := false
+  rf.Lock()
+  defer func() {
+    rf.Unlock()
+    if shouldResetElectionTimer {
+      // Reset election timer
+      rf.notifyQ<-true
+    }
+  }()
+  cdata := &rf.cdata
+  reply.Term = cdata.CurrentTerm
+  if args.Term < cdata.CurrentTerm {
+    // out-of-date leader
+    return
+  }
+  // This server can't be a leader from here
+  shouldResetElectionTimer = !termUpdated
+  if args.LastLogIndex <= rf.commitIndex {
+    // old request
+    return
+  }
+  rf.leader = args.LeaderId
+  reply.Success = true
+
+  cdata.Log = make([]LogEntry, 1)
+  cdata.Log[0] = LogEntry{
+    Term: args.LastLogTerm,
+  }
+  cdata.LastCompactedIndex  = args.LastLogIndex
+  rf.commitIndex = cdata.LastCompactedIndex
+  rf.lastApplied = cdata.LastCompactedIndex
+  rf.snapshot = args.Snapshot
+  rf.persist()
+  rf.applyCh<-ApplyMsg{
+    InstallSnapshot: true,
+    Command: rf.snapshot,
+  }
+  rf.Log("Installed snapshot from leader %d with last applied index %d at term %d",
+    args.LeaderId, args.LastLogIndex, args.Term)
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *RequestReply) bool {
   // rf.Log("Sent AppendEntriesArgs %+v to peer %d", *args, server)
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
+
+func (rf *Raft) sendInstallSnapshot(server int,
+  args *InstallSnapshotArgs, reply *RequestReply) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
 	return ok
 }
 
@@ -281,7 +333,7 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
   }
   cdata.Log = append(cdata.Log, entry)
   index = cdata.LastLogIndex()
-  // rf.persist()
+  rf.persist()
   rf.Log("Appended entry %+v at %d.", entry, index)
   return
 }
@@ -428,7 +480,7 @@ func (rf *Raft) onCandidate() {
   }
 }
 
-func (rf *Raft)onLeader() {
+func (rf *Raft) onLeader() {
   func() {
     rf.nextIndex = make([]int, len(rf.peers))
     rf.matchIndex = make([]int, len(rf.peers))
@@ -447,6 +499,8 @@ func (rf *Raft)onLeader() {
 }
 
 func (rf *Raft) replicateLogs() {
+  // var wg sync.WaitGroup
+  // defer wg.Wait()
   replyChan := make(Gchan, len(rf.peers))
 
   numRPCs := 0
@@ -456,33 +510,42 @@ func (rf *Raft) replicateLogs() {
       numRPCs, numReplies, rf.cdata.CurrentTerm)
   }()
   var sendRecursively func(peer int)
+  var sendInstallSnapshot func(peer int)
   sendRecursively = func (peer int) {
     var args AppendEntriesArgs
     prepareArgs := func() bool {
       rf.RLock()
       defer rf.RUnlock()
-      rf.Log("Send Peer %d nextIndex %d", peer, rf.nextIndex[peer])
+      cdata := &rf.cdata
+      if cdata.Role != Leader || !rf.live {
+        return false
+      }
+
+      rf.Log("Sending to Peer %d nextIndex %d LastCompactedIndex %d with role %d term %d",
+        peer, rf.nextIndex[peer], cdata.LastCompactedIndex, cdata.Role, cdata.CurrentTerm)
+      if rf.nextIndex[peer] <= cdata.LastCompactedIndex {
+        sendInstallSnapshot(peer)
+        return false
+      }
       args = AppendEntriesArgs{
+        Term: cdata.CurrentTerm,
         LeaderId: rf.me,
         // Stale value also works
         LeaderCommit: rf.commitIndex,
         PrevLogIndex: rf.nextIndex[peer] - 1,
+        PrevLogTerm: cdata.LogEntry(rf.nextIndex[peer] - 1).Term,
+        Entries: cdata.Log[rf.nextIndex[peer] - cdata.LastCompactedIndex :],
       }
-      cdata := &rf.cdata
-      if cdata.Role != Leader {
-        return false
-      }
-      args.Term = cdata.CurrentTerm
-      args.PrevLogTerm = cdata.LogEntry(rf.nextIndex[peer) - 1].Term
-      args.Entries = cdata.LogEntry(rf.nextIndex[peer):]
       return true
     }
     if !prepareArgs() {
       return
     }
+    // wg.Add(1)
 		go func() {
       time.Sleep(getHearbeatTimeout())
       sendRecursively(peer)
+      // wg.Done()
     }()
 
     reply := RequestReply{}
@@ -492,6 +555,52 @@ func (rf *Raft) replicateLogs() {
       reply.NextIndex = args.PrevLogIndex + 1
       reply.AppendedNewEntries = len(args.Entries)
       rf.Log("AppendEntries request %+v got reply %+v", args, reply)
+      replyChan <- encodeReply(reply)
+    }
+  }
+
+  sendInstallSnapshot = func(peer int) {
+    var args InstallSnapshotArgs
+    nextIndex := rf.nextIndex[peer]
+    prepareArgs := func() bool {
+      rf.RLock()
+      defer rf.RUnlock()
+      cdata := &rf.cdata
+      if cdata.Role != Leader || !rf.live {
+        return false
+      }
+      if rf.nextIndex[peer] > cdata.LastCompactedIndex {
+        // Stale request
+        return false
+      }
+      args = InstallSnapshotArgs{
+        Term: cdata.CurrentTerm,
+        LeaderId: rf.me,
+        Snapshot: rf.persister.ReadSnapshot(),
+        LastLogIndex: cdata.LastCompactedIndex,
+        LastLogTerm: cdata.LogEntry(cdata.LastCompactedIndex).Term,
+      }
+      defer rf.Log("Prepared Peer %d install snapshot with LastLogIndex = %d LastLogTerm = %d",
+        peer, args.LastLogIndex, args.LastLogTerm)
+      return true
+    }
+    if !prepareArgs() {
+      return
+    }
+    // wg.Add(1)
+		go func() {
+      time.Sleep(getHearbeatTimeout())
+      sendRecursively(peer)
+      // wg.Done()
+    }()
+
+    reply := RequestReply{}
+    ok := rf.sendInstallSnapshot(peer, &args, &reply)
+    if ok {
+      reply.Peer = peer
+      reply.NextIndex = nextIndex
+      reply.AppendedNewEntries = args.LastLogIndex - nextIndex + 1
+      rf.Log("InstallSnapshot request %+v got reply %+v", args, reply)
       replyChan <- encodeReply(reply)
     }
   }
@@ -512,10 +621,10 @@ func (rf *Raft) replicateLogs() {
     isCurrentTerm := false
     rf.RLock()
     cdata := &rf.cdata
-    if cdata.Role != Leader {
+    if cdata.Role != Leader || !rf.live {
       return false
     }
-    isCurrentTerm = N < len(cdata.Log) && cdata.LogEntry(N).Term == cdata.CurrentTerm
+    isCurrentTerm = cdata.LogEntry(N).Term == cdata.CurrentTerm
     rf.RUnlock()
 
     if isCurrentTerm {
@@ -527,13 +636,11 @@ func (rf *Raft) replicateLogs() {
         if match >= N {
           numGoodPeers++
           if 2 * numGoodPeers > len(rf.peers) {
-            rf.commitIndex = N
-            rf.RLock()
-            if rf.cdata.Role != Leader {
+            if cdata.Role != Leader || !rf.live {
               return false
             }
-            rf.persist()
-            rf.RUnlock()
+            rf.commitIndex = N
+            // rf.persist()
             if rf.commitIndex > rf.lastApplied {
               rf.applierWakeup<-true
             }
@@ -546,16 +653,9 @@ func (rf *Raft) replicateLogs() {
   }
 
   skipConflictingEntries := func(reply RequestReply) bool {
+    rf.Lock()
     peer := reply.Peer
     next := rf.nextIndex[peer]
-    if next != reply.NextIndex {
-      // Stale reply
-      rf.Log("Got a stale reply: %+v", reply)
-      return true
-    }
-    conflictingTerm, firstIndex := reply.ConflictingTerm, reply.FirstLogIndex
-
-    rf.Lock()
     defer func() {
       if next != rf.nextIndex[peer] {
         rf.Log("Updated peer %d next index from %d to %d",
@@ -570,6 +670,12 @@ func (rf *Raft) replicateLogs() {
       rf.Log("Not the leader any more.")
       return false
     }
+    if next != reply.NextIndex {
+      // Stale reply
+      rf.Log("Got a stale reply: %+v", reply)
+      return true
+    }
+    conflictingTerm, firstIndex := reply.ConflictingTerm, reply.FirstLogIndex
 
     if conflictingTerm < 0 {
       // The follower's log is shorter than the previou probe
@@ -597,7 +703,11 @@ func (rf *Raft) replicateLogs() {
     }
     peer := p
     numRPCs++
-    go sendRecursively(peer)
+    // wg.Add(1)
+    go func() {
+      sendRecursively(peer)
+      // wg.Done()
+    }()
   }
 
   for rf.getRole() == Leader {
@@ -636,6 +746,12 @@ func (rf *Raft) SetMaxStateSize(size int) {
   rf.maxStateSize = size
 }
 
+func (rf *Raft) RaftStateSize() int {
+  rf.Lock()
+  defer rf.Unlock()
+  return rf.persister.RaftStateSize()
+}
+
 func (rf *Raft) CompactLogs(snapshot Bytes, lastAppliedIndex int) {
   rf.Lock()
   defer rf.Unlock()
@@ -643,9 +759,12 @@ func (rf *Raft) CompactLogs(snapshot Bytes, lastAppliedIndex int) {
   rf.assert(lastAppliedIndex >= cdata.LastCompactedIndex,
     "Snapshot last applied index %d < already compacted last index %d",
     lastAppliedIndex, cdata.LastCompactedIndex)
-  cdata.Log = cdata.LogEntry(lastAppliedIndex - cdata.LastCompactedIndex:)
+  cdata.Log = cdata.Log[lastAppliedIndex - cdata.LastCompactedIndex:]
   rf.snapshot = snapshot
   cdata.LastCompactedIndex = lastAppliedIndex
+  rf.persist()
+  rf.Log("Compacted logs with last compacted index: %d",
+    cdata.LastCompactedIndex)
 }
 
 //
@@ -694,6 +813,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState(), persister.ReadSnapshot())
+  rf.Log("Made raft %+v", rf.cdata)
   rand.Seed(int64(time.Now().Nanosecond()))
   // rand.Seed(int64(1234567))
   rf.wg.Add(1)
@@ -706,26 +826,34 @@ func Make(peers []*labrpc.ClientEnd, me int,
         return
       }
       for rf.lastApplied < rf.commitIndex {
+        rf.Lock()
         msg := ApplyMsg{
           CommandValid: true,
           CommandIndex: rf.lastApplied + 1,
         }
         term := 0
-        rf.RLock()
+        rf.assert(rf.lastApplied <= rf.commitIndex,
+          "lastApplied should <= rf.commitIndex")
+        if rf.lastApplied == rf.commitIndex {
+          break
+        }
         rf.assert(rf.lastApplied + 1 <= rf.cdata.LastLogIndex(),
           "last applied too large %d > %d.", rf.lastApplied, rf.cdata.LastLogIndex())
         msg.Command = rf.cdata.LogEntry(rf.lastApplied + 1).Cmd
         term = rf.cdata.LogEntry(rf.lastApplied + 1).Term
-        rf.RUnlock()
+        rf.lastApplied++
+        rf.Unlock()
         rf.Log("Applied %+v at term %d", msg, term)
-        select {
-          case rf.applyCh<-msg:
-            // No other threads touch 'lastApplied'
-            rf.lastApplied++
-          case live := <-rf.applierWakeup:
-            if !live {
-              return
-            }
+        sent := false
+        for !sent {
+          select {
+            case rf.applyCh<-msg:
+              sent = true
+            case live := <-rf.applierWakeup:
+              if !live {
+                return
+              }
+          }
         }
       }
     }

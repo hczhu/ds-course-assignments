@@ -18,6 +18,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+  InstallSnapshot bool
 }
 
 type LogEntry struct {
@@ -47,7 +48,7 @@ func (cdata *CoreData) LogEntry(idx int) *LogEntry {
 }
 
 func (cdata *CoreData) LastLogIndex() int {
-  return len(cdata.Log) -1  + cdata.LastCompactedIndex
+  return len(cdata.Log) - 1  + cdata.LastCompactedIndex
 }
 
 func (cdata *CoreData) LastLogTerm() int {
@@ -122,6 +123,14 @@ type RequestReply struct {
   FirstLogIndex int
 }
 
+type InstallSnapshotArgs struct {
+  Term int
+  LeaderId int
+  Snapshot Bytes
+  LastLogIndex int
+  LastLogTerm int
+}
+
 type AppendEntriesArgs struct {
   Term int // leader's term
   LeaderId int // so follower can redirect clients
@@ -132,5 +141,3 @@ type AppendEntriesArgs struct {
   Entries []LogEntry
   LeaderCommit int // leader's commitIndex
 }
-
-

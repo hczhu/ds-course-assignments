@@ -855,6 +855,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
               }
           }
         }
+        rf.Log("Sent %+v at term %d", msg, term)
       }
     }
   }()

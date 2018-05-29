@@ -62,6 +62,7 @@ func (ck *Clerk) tryAllServers(f func(serverId int)bool) {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
+  fmt.Println("Getting key:", key)
   args := GetArgs{
     Key: key,
     Client: ck.client,
@@ -72,6 +73,7 @@ func (ck *Clerk) Get(key string) string {
     reply = GetReply{}
     ok := ck.servers[server].Call("KVServer.Get", &args, &reply)
     if ok {
+      fmt.Printf("RPC Get got reply %+v\n", reply)
       if reply.WrongLeader {
         ck.leader = reply.Leader
         return false
@@ -109,6 +111,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
     reply := PutAppendReply{}
     ok := ck.servers[server].Call("KVServer.PutAppend", &args, &reply)
     if ok {
+      fmt.Printf("PutAppend got reply %+v\n", reply)
       if reply.WrongLeader {
         ck.leader = reply.Leader
         return false

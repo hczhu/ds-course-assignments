@@ -144,6 +144,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 // turn off debug output from this instance.
 //
 func (kv *KVServer) Kill() {
+  kv.rf.Log("Killing raft")
 	kv.rf.Kill()
   kv.rf.Log("Killed raft")
   kv.applyCh <- raft.ApplyMsg {
@@ -219,7 +220,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
       kv.lastAppliedIndex = ss.LastAppliedIndex
       kv.kvMap = ss.KvMap
       kv.clientLastSeq = ss.ClientLastSeq
-      kv.rf.Log("Install snapshot with last applied index: %d",
+      kv.rf.Log("Installed snapshot with last applied index: %d",
         ss.LastAppliedIndex)
     }
 

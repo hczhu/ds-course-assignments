@@ -26,7 +26,7 @@ type Bytes []byte
 
 var gStartTime time.Time = time.Now()
 
-var gPrintLog bool = false
+var gPrintLog bool = true
 var gPersist bool = true
 
 func min(a, b int) int {
@@ -277,6 +277,8 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *RequestReply) 
   // This server can't be a leader from here
   shouldResetElectionTimer = !termUpdated
   if args.LastLogIndex <= rf.commitIndex {
+    rf.Log("Stale install snapshot request with last index = %d, my commit index = %d",
+      args.LastLogIndex, rf.commitIndex)
     // old request
     return
   }
@@ -486,7 +488,7 @@ func (rf *Raft) onLeader() {
     rf.matchIndex = make([]int, len(rf.peers))
     rf.RLock()
     rf.leader = rf.me
-    logLen := len(rf.cdata.Log)
+    logLen := rf.cdata.LastLogIndex() + 1
     rf.RUnlock()
     for i, _ := range rf.nextIndex {
       rf.nextIndex[i] = logLen
@@ -600,6 +602,7 @@ func (rf *Raft) replicateLogs() {
       reply.Peer = peer
       reply.NextIndex = nextIndex
       reply.AppendedNewEntries = args.LastLogIndex - nextIndex + 1
+      args.Snapshot = nil
       rf.Log("InstallSnapshot request %+v got reply %+v", args, reply)
       replyChan <- encodeReply(reply)
     }

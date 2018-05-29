@@ -258,8 +258,9 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *RequestReply) 
   termUpdated := rf.updateTerm(args.Term, true)
 
   reply.Peer = rf.me
-  reply.Success = false
+  reply.Success = true
   shouldResetElectionTimer := false
+  installed := false
   rf.Lock()
   defer func() {
     rf.Unlock()
@@ -267,7 +268,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *RequestReply) 
       // Reset election timer
       rf.notifyQ<-true
     }
-    if reply.Success {
+    if installed {
       rf.applyCh<-ApplyMsg{
         InstallSnapshot: true,
         Command: rf.snapshot,
@@ -280,6 +281,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *RequestReply) 
     // out-of-date leader
     return
   }
+  rf.leader = args.LeaderId
   // This server can't be a leader from here
   shouldResetElectionTimer = !termUpdated
   if args.LastLogIndex <= rf.commitIndex {
@@ -288,7 +290,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *RequestReply) 
     // old request
     return
   }
-  rf.leader = args.LeaderId
   reply.Success = true
 
   cdata.Log = make([]LogEntry, 1)
@@ -296,6 +297,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *RequestReply) 
     Term: args.LastLogTerm,
   }
   cdata.LastCompactedIndex  = args.LastLogIndex
+  installed = true
   rf.commitIndex = cdata.LastCompactedIndex
   rf.lastApplied = cdata.LastCompactedIndex
   rf.snapshot = args.Snapshot

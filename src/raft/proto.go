@@ -51,6 +51,10 @@ func (cdata *CoreData) LastLogIndex() int {
   return len(cdata.Log) - 1  + cdata.LastCompactedIndex
 }
 
+func (cdata *CoreData) GoodIndex(idx int) bool {
+  return idx >= cdata.LastCompactedIndex && idx <= cdata.LastLogIndex()
+}
+
 func (cdata *CoreData) LastLogTerm() int {
   return cdata.LogEntry(cdata.LastLogIndex()).Term
 }

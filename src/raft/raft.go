@@ -221,7 +221,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *RequestReply) {
   if args.PrevLogTerm != cdata.LogEntry(args.PrevLogIndex).Term {
     reply.ConflictingTerm = cdata.LogEntry(args.PrevLogIndex).Term;
     for reply.FirstLogIndex = args.PrevLogIndex;
-        reply.FirstLogIndex > 0 &&
+        reply.FirstLogIndex > cdata.LastCompactedIndex &&
         cdata.LogEntry(reply.FirstLogIndex - 1).Term == reply.ConflictingTerm;
         reply.FirstLogIndex-- {}
     return
@@ -823,6 +823,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState(), persister.ReadSnapshot())
+  rf.leader = rf.cdata.VotedFor
+  rf.commitIndex = rf.cdata.LastCompactedIndex
+  rf.lastApplied = rf.cdata.LastCompactedIndex
+
   rf.Log("Made raft %+v", rf.cdata)
   rand.Seed(int64(time.Now().Nanosecond()))
   // rand.Seed(int64(1234567))
@@ -848,6 +852,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
           rf.Unlock()
           break
         }
+        rf.assert(rf.cdata.GoodIndex(rf.lastApplied + 1), "rf.lastApplied %d is not good",
+          rf.lastApplied)
         rf.assert(rf.lastApplied + 1 <= rf.cdata.LastLogIndex(),
           "last applied too large %d > %d.", rf.lastApplied, rf.cdata.LastLogIndex())
         msg.Command = rf.cdata.LogEntry(rf.lastApplied + 1).Cmd

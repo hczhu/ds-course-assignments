@@ -52,6 +52,7 @@ type KVServer struct {
 }
 
 func (kv *KVServer) commitOne(cmd Cmd) int {
+  kv.rf.Log("Trying to commit %+v", cmd)
   logIndex, term, isLeader := kv.rf.Start(cmd)
   if !isLeader {
     return ErrWrongLeader
@@ -73,6 +74,7 @@ func (kv *KVServer) commitOne(cmd Cmd) int {
     timeout := false
     select {
       case <-to:
+        kv.rf.Log("committing timeouted")
         timeout = true
       case <-kv.callerCh:
         kv.rf.Log("Waken up")
@@ -227,6 +229,12 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
     // kv.maxraftstate = 1
     run := func() bool {
       msg := <-kv.applyCh
+      defer func() {
+        if _, isLeader := kv.rf.GetState(); isLeader {
+          kv.rf.Log("Waking up the caller.")
+          kv.callerCh<-true
+        }
+      }()
       if msg.InstallSnapshot {
         kv.Lock()
         defer kv.Unlock()
@@ -237,12 +245,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
       if cmd.Quit {
         return false
       }
-      defer func() {
-        if _, isLeader := kv.rf.GetState(); isLeader {
-          kv.rf.Log("Waking up the caller.")
-          kv.callerCh<-true
-        }
-      }()
       kv.Lock()
       if cmd.Seq <= kv.clientLastSeq[cmd.ClientId] {
         dupCmds++

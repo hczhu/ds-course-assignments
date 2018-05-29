@@ -46,6 +46,7 @@ func (ck *Clerk) tryAllServers(f func(serverId int)bool) {
         }
       }
     }
+    fmt.Println("Tried all servers. No luck.")
   }
 }
 

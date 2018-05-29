@@ -838,6 +838,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
         rf.assert(rf.lastApplied <= rf.commitIndex,
           "lastApplied should <= rf.commitIndex")
         if rf.lastApplied == rf.commitIndex {
+          rf.Unlock()
           break
         }
         rf.assert(rf.lastApplied + 1 <= rf.cdata.LastLogIndex(),

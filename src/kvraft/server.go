@@ -52,21 +52,22 @@ type KVServer struct {
 }
 
 func (kv *KVServer) commitOne(cmd Cmd) int {
-  kv.rf.Log("Trying to commit %+v", cmd)
+  kv.rf.Log("Server Trying to commit %+v", cmd)
   logIndex, term, isLeader := kv.rf.Start(cmd)
   if !isLeader {
     return ErrWrongLeader
   }
+  kv.rf.Log("Server is the leader")
   kv.RLock()
   lastSeq := kv.clientLastSeq[cmd.ClientId]
   kv.RUnlock()
   if cmd.Seq <= lastSeq {
-    kv.rf.Log("Duplicate cmd: %+v", cmd)
+    kv.rf.Log("Server Duplicate cmd: %+v", cmd)
     return Success
   }
   ret := ErrCommitTimeout
   defer func() {
-    kv.rf.Log("Committing log item: %+v at index %d at term %d status: %d.\n",
+    kv.rf.Log("Server Committing log item: %+v at index %d at term %d status: %d.\n",
       cmd, logIndex, term, ret)
   }()
   to := time.After(CommitTimeout)
@@ -74,10 +75,10 @@ func (kv *KVServer) commitOne(cmd Cmd) int {
     timeout := false
     select {
       case <-to:
-        kv.rf.Log("committing timeouted")
+        kv.rf.Log("Server committing timeouted")
         timeout = true
       case <-kv.callerCh:
-        kv.rf.Log("Waken up")
+        kv.rf.Log("Server Waken up")
     }
     rfTerm, leader := kv.rf.GetState()
     if term != rfTerm || !leader {
@@ -146,9 +147,9 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 // turn off debug output from this instance.
 //
 func (kv *KVServer) Kill() {
-  kv.rf.Log("Killing raft")
+  kv.rf.Log("Server Killing raft")
 	kv.rf.Kill()
-  kv.rf.Log("Killed raft")
+  kv.rf.Log("Server Killed raft")
   kv.applyCh <- raft.ApplyMsg {
     Command: Cmd {
       Quit: true,
@@ -201,7 +202,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
   kv.wg.Add(1)
   go func() {
     dupCmds := 0
-    defer kv.rf.Log("Exiting KV applier with %d duplicate cmds\n.", dupCmds)
+    defer kv.rf.Log("Server Exiting KV applier with %d duplicate cmds\n.", dupCmds)
     defer kv.wg.Done()
     snapshot := func() []byte{
       ss := Snapshot{
@@ -222,7 +223,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
       kv.lastAppliedIndex = ss.LastAppliedIndex
       kv.kvMap = ss.KvMap
       kv.clientLastSeq = ss.ClientLastSeq
-      kv.rf.Log("Installed snapshot with last applied index: %d",
+      kv.rf.Log("Server Installed snapshot with last applied index: %d",
         ss.LastAppliedIndex)
     }
 
@@ -231,7 +232,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
       msg := <-kv.applyCh
       defer func() {
         if _, isLeader := kv.rf.GetState(); isLeader {
-          kv.rf.Log("Waking up the caller.")
+          kv.rf.Log("Server Waking up the caller.")
           kv.callerCh<-true
         }
       }()
@@ -259,14 +260,14 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
         kv.clientLastSeq[cmd.ClientId] = cmd.Seq
       }
       kv.lastAppliedIndex = msg.CommandIndex
-      kv.rf.Log("Applied %+v\n", msg)
+      kv.rf.Log("Server Applied %+v\n", msg)
       var ss []byte
       if kv.maxraftstate > 0 && kv.rf.RaftStateSize() > kv.maxraftstate {
         ss = snapshot()
       }
       kv.Unlock()
       if ss != nil {
-        kv.rf.Log("Compacting raft logs...")
+        kv.rf.Log("Server Compacting raft logs...")
         kv.rf.CompactLogs(ss, kv.lastAppliedIndex)
       }
       return true

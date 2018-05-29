@@ -267,6 +267,12 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *RequestReply) 
       // Reset election timer
       rf.notifyQ<-true
     }
+    if reply.Success {
+      rf.applyCh<-ApplyMsg{
+        InstallSnapshot: true,
+        Command: rf.snapshot,
+      }
+    }
   }()
   cdata := &rf.cdata
   reply.Term = cdata.CurrentTerm
@@ -294,10 +300,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *RequestReply) 
   rf.lastApplied = cdata.LastCompactedIndex
   rf.snapshot = args.Snapshot
   rf.persist()
-  rf.applyCh<-ApplyMsg{
-    InstallSnapshot: true,
-    Command: rf.snapshot,
-  }
   rf.Log("Installed snapshot from leader %d with last applied index %d at term %d",
     args.LeaderId, args.LastLogIndex, args.Term)
 }
@@ -623,12 +625,18 @@ func (rf *Raft) replicateLogs() {
     }
     isCurrentTerm := false
     rf.RLock()
+    defer func() {
+      rf.RUnlock()
+      if rf.commitIndex > rf.lastApplied {
+        rf.applierWakeup<-true
+      }
+    }()
+
     cdata := &rf.cdata
     if cdata.Role != Leader || !rf.live {
       return false
     }
     isCurrentTerm = cdata.LogEntry(N).Term == cdata.CurrentTerm
-    rf.RUnlock()
 
     if isCurrentTerm {
       numGoodPeers := 1
@@ -644,10 +652,7 @@ func (rf *Raft) replicateLogs() {
             }
             rf.commitIndex = N
             // rf.persist()
-            if rf.commitIndex > rf.lastApplied {
-              rf.applierWakeup<-true
-            }
-            break
+            return true
           }
         }
       }

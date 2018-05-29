@@ -182,6 +182,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv := new(KVServer)
 	kv.me = me
+  maxraftstate = 1
 	kv.maxraftstate = maxraftstate
 
 	kv.applyCh = make(chan raft.ApplyMsg)

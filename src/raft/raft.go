@@ -26,7 +26,7 @@ type Bytes []byte
 
 var gStartTime time.Time = time.Now()
 
-var gPrintLog bool = false
+var gPrintLog bool = true
 var gPersist bool = true
 
 func min(a, b int) int {
@@ -834,7 +834,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
         term := 0
         rf.assert(rf.lastApplied <= rf.commitIndex,
           "lastApplied should <= rf.commitIndex")
-        if rf.lastApplied == rf.commitIndex {
+        if rf.lastApplied <  rf.commitIndex {
+          rf.Unlock()
           break
         }
         rf.assert(rf.lastApplied + 1 <= rf.cdata.LastLogIndex(),

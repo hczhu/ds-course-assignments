@@ -55,6 +55,7 @@ func (kv *KVServer) commitOne(cmd Cmd) int {
   kv.rf.Log("Server Trying to commit %+v", cmd)
   logIndex, term, isLeader := kv.rf.Start(cmd)
   if !isLeader {
+    kv.rf.Log("Server is not the leader.")
     return ErrWrongLeader
   }
   kv.rf.Log("Server is the leader")

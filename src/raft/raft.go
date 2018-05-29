@@ -505,7 +505,7 @@ func (rf *Raft) onLeader() {
 func (rf *Raft) replicateLogs() {
   // var wg sync.WaitGroup
   // defer wg.Wait()
-  replyChan := make(Gchan, len(rf.peers))
+  replyChan := make(Gchan, 1000)
 
   numRPCs := 0
   numReplies := 0
@@ -528,7 +528,7 @@ func (rf *Raft) replicateLogs() {
       rf.Log("Sending to Peer %d nextIndex %d LastCompactedIndex %d with role %d term %d",
         peer, rf.nextIndex[peer], cdata.LastCompactedIndex, cdata.Role, cdata.CurrentTerm)
       if rf.nextIndex[peer] <= cdata.LastCompactedIndex {
-        sendInstallSnapshot(peer)
+        go sendInstallSnapshot(peer)
         return false
       }
       args = AppendEntriesArgs{

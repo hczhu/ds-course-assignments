@@ -180,10 +180,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // Receiver's handler
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *RequestReply) {
   // rf.Log("Got AppendEntriesArgs %+v", *args)
-  if args == nil {
-    rf.Log("Nil input args for AppendEntriesArgs")
-    return
-  }
   termUpdated := rf.updateTerm(args.Term, true)
 
   defer func() {
@@ -216,6 +212,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *RequestReply) {
   if args.PrevLogIndex > cdata.LastLogIndex() {
     reply.ConflictingTerm = -1
     reply.FirstLogIndex = cdata.LastLogIndex() + 1
+    return
+  }
+  if args.PrevLogIndex < cdata.LastCompactedIndex {
+    // Must be a stale request
+    reply.Success = true
     return
   }
   if args.PrevLogTerm != cdata.LogEntry(args.PrevLogIndex).Term {

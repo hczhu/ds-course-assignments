@@ -403,6 +403,7 @@ func (rf *Raft)onFollower() {
   result := rf.MultiWait(nil, getElectionTimeout())
   switch {
     case result.timeout:
+      rf.Log("Follower timeouted")
       rf.Lock()
       rf.cdata.Role = Candidate
       // cdata.CurrentTerm++
@@ -700,6 +701,10 @@ func (rf *Raft) replicateLogs() {
       rf.Log("Got a stale reply: %+v", reply)
       return true
     }
+    if next <= cdata.LastCompactedIndex {
+      rf.Log("The logs have just been compacted to %d. A snapshot will be sent and installed.",
+        cdata.LastCompactedIndex)
+    }
     conflictingTerm, firstIndex := reply.ConflictingTerm, reply.FirstLogIndex
 
     if conflictingTerm < 0 {
@@ -842,6 +847,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
   rf.commitIndex = rf.cdata.LastCompactedIndex
   rf.lastApplied = rf.cdata.LastCompactedIndex
   if rf.snapshot != nil {
+    rf.Log("Notifying the initial snapshot")
     // Notify the kv server of the initial snapshot 
     rf.applyCh<-ApplyMsg{
       InstallSnapshot: true,

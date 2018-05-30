@@ -4,7 +4,7 @@ import "labrpc"
 import "crypto/rand"
 import "math/big"
 import "sync/atomic"
-import "fmt"
+// import "fmt"
 
 
 type Clerk struct {
@@ -46,7 +46,7 @@ func (ck *Clerk) tryAllServers(f func(serverId int)bool) {
         }
       }
     }
-    fmt.Println("Tried all servers. No luck.")
+    // fmt.Println("Tried all servers. No luck.")
   }
 }
 
@@ -63,7 +63,7 @@ func (ck *Clerk) tryAllServers(f func(serverId int)bool) {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
-  fmt.Println("Getting key:", key)
+  // fmt.Println("Getting key:", key)
   args := GetArgs{
     Key: key,
     Client: ck.client,
@@ -74,7 +74,7 @@ func (ck *Clerk) Get(key string) string {
     reply = GetReply{}
     ok := ck.servers[server].Call("KVServer.Get", &args, &reply)
     if ok {
-      fmt.Printf("RPC Get got reply %+v\n", reply)
+      // fmt.Printf("RPC Get got reply %+v\n", reply)
       if reply.WrongLeader {
         ck.leader = reply.Leader
         return false
@@ -83,7 +83,7 @@ func (ck *Clerk) Get(key string) string {
         return true
       }
     } else {
-      fmt.Printf("RPC timeout: %+v\n", args)
+      // fmt.Printf("RPC timeout: %+v\n", args)
     }
     return false
   })
@@ -112,7 +112,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
     reply := PutAppendReply{}
     ok := ck.servers[server].Call("KVServer.PutAppend", &args, &reply)
     if ok {
-      fmt.Printf("PutAppend got reply %+v\n", reply)
+      // fmt.Printf("PutAppend got reply %+v\n", reply)
       if reply.WrongLeader {
         ck.leader = reply.Leader
         return false

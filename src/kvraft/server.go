@@ -224,8 +224,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
       kv.lastAppliedIndex = ss.LastAppliedIndex
       kv.kvMap = ss.KvMap
       kv.clientLastSeq = ss.ClientLastSeq
-      kv.rf.Log("Server Installed snapshot with last applied index: %d",
-        ss.LastAppliedIndex)
+      kv.rf.Log("Server Installed snapshot with last applied index: %d and %d KVs",
+        ss.LastAppliedIndex, len(kv.kvMap))
     }
 
     // kv.maxraftstate = 1

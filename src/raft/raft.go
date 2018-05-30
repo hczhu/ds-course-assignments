@@ -841,6 +841,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
   rf.leader = rf.cdata.VotedFor
   rf.commitIndex = rf.cdata.LastCompactedIndex
   rf.lastApplied = rf.cdata.LastCompactedIndex
+  if rf.snapshot != nil {
+    // Notify the kv server of the initial snapshot 
+    rf.applyCh<-ApplyMsg{
+      InstallSnapshot: true,
+      Command: rf.snapshot,
+    }
+    rf.Log("Notified the initial snapshot")
+  }
 
   rf.Log("Made raft %+v", rf.cdata)
   rand.Seed(int64(time.Now().Nanosecond()))

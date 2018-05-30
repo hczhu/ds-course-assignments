@@ -786,9 +786,10 @@ func (rf *Raft) CompactLogs(snapshot Bytes, lastAppliedIndex int) {
   rf.Lock()
   defer rf.Unlock()
   cdata := &rf.cdata
-  rf.assert(lastAppliedIndex >= cdata.LastCompactedIndex,
-    "Snapshot last applied index %d < already compacted last index %d",
-    lastAppliedIndex, cdata.LastCompactedIndex)
+  if lastAppliedIndex < cdata.LastCompactedIndex {
+    rf.Log("The logs have already been compacted to %d", cdata.LastCompactedIndex)
+    return
+  }
   cdata.Log = cdata.Log[lastAppliedIndex - cdata.LastCompactedIndex:]
   rf.snapshot = snapshot
   cdata.LastCompactedIndex = lastAppliedIndex

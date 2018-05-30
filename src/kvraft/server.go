@@ -268,7 +268,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
       }
       kv.Unlock()
       if ss != nil {
-        kv.rf.Log("Server Compacting raft logs...")
+        kv.rf.Log("Server Compacting raft logs to %d", kv.lastAppliedIndex)
         kv.rf.CompactLogs(ss, kv.lastAppliedIndex)
       }
       return true

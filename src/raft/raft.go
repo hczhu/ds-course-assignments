@@ -713,12 +713,12 @@ func (rf *Raft) replicateLogs() {
       return true
     }
 
-    for next--; next > firstIndex; next-- {
+    for next--; next > firstIndex && next > cdata.LastCompactedIndex; next-- {
       if cdata.LogEntry(next - 1).Term == conflictingTerm {
         return true
       }
     }
-    for next > 0 && cdata.LogEntry(next - 1).Term == conflictingTerm {
+    for next > cdata.LastCompactedIndex && cdata.LogEntry(next - 1).Term == conflictingTerm {
       next--
     }
     return true

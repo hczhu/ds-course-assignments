@@ -290,7 +290,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
       select {
         case <-stopQ:
           return
-        case <-time.After(time.Duration(100) * time.Millisecond)
+        case <-time.After(time.Duration(100) * time.Millisecond):
           run()
       }
     }

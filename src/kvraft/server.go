@@ -208,17 +208,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
     dupCmds := 0
     defer kv.rf.Log("Server Exiting KV applier with %d duplicate cmds\n.", dupCmds)
     defer kv.wg.Done()
-    snapshot := func() []byte{
-      ss := Snapshot{
-        LastAppliedIndex: kv.lastAppliedIndex,
-        KvMap: kv.kvMap,
-        ClientLastSeq: kv.clientLastSeq,
-      }
-      w := new(bytes.Buffer)
-      e := labgob.NewEncoder(w)
-      e.Encode(ss)
-	    return w.Bytes()
-    }
     installSnapshot := func(data []byte) {
 	    r := bytes.NewBuffer(data)
 	    d := labgob.NewDecoder(r)
@@ -273,6 +262,18 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
   kv.wg.Add(1)
   go func() {
+    snapshot := func() []byte{
+      ss := Snapshot{
+        LastAppliedIndex: kv.lastAppliedIndex,
+        KvMap: kv.kvMap,
+        ClientLastSeq: kv.clientLastSeq,
+      }
+      w := new(bytes.Buffer)
+      e := labgob.NewEncoder(w)
+      e.Encode(ss)
+	    return w.Bytes()
+    }
+
     defer kv.wg.Done()
     run := func() {
       var ss []byte
@@ -288,7 +289,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
     }
     for {
       select {
-        case <-stopQ:
+        case <-kv.stopQ:
           return
         case <-time.After(time.Duration(100) * time.Millisecond):
           run()

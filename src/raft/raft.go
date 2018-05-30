@@ -441,22 +441,34 @@ func (rf *Raft) onCandidate() {
   if !prepareCandidacy() {
     return
   }
+  peerReplied := make([]bool, len(rf.peers))
   ch := make(Gchan, len(rf.peers))
+  var sendRequest func(int)
+  sendRequest = func(peer int) {
+    if peerReplied[peer] {
+      return
+    }
+    go func() {
+      time.Sleep(getHearbeatTimeout())
+      sendRequest(peer)
+    }()
+    reply := RequestReply{}
+    ok := rf.sendRequestVote(peer, &args, &reply)
+    if ok {
+      peerReplied[peer] = true
+      ch <- encodeReply(reply)
+    }
+  }
   for p, _ := range rf.peers {
     if p == rf.me {
       continue
     }
     peer := p
-    go func() {
-      reply := RequestReply{}
-      ok := rf.sendRequestVote(peer, &args, &reply)
-      if ok {
-        ch <- encodeReply(reply)
-      }
-    }()
+    go sendRequest(peer)
   }
   rf.Log("Fanning out RequestVote %+v", args)
   votes := 1
+  seenVotes := make([]bool, len(rf.peers))
   for 2 * votes <= len(rf.peers) {
     result := rf.MultiWaitCh(ch, timeoutCh)
     switch {
@@ -466,12 +478,15 @@ func (rf *Raft) onCandidate() {
         return
       default:
         reply := result.reply
-        rf.Log("Got RequestVote reply: %+v", reply)
-        if rf.updateTerm(reply.Term, false) {
-          return
-        }
-        if reply.Success {
-          votes++
+        if !seenVotes[reply.Peer] {
+          seenVotes[reply.Peer] = true
+          rf.Log("Got RequestVote reply: %+v", reply)
+          if rf.updateTerm(reply.Term, false) {
+            return
+          }
+          if reply.Success {
+            votes++
+          }
         }
     }
   }

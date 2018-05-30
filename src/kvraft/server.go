@@ -38,6 +38,7 @@ type KVServer struct {
 	me      int
 	rf      *raft.Raft
 	applyCh chan raft.ApplyMsg
+  stopQ chan bool
 
 	maxraftstate int // snapshot if log grows this big
 
@@ -156,6 +157,7 @@ func (kv *KVServer) Kill() {
       Quit: true,
     },
   }
+  kv.stopQ<-true
   kv.wg.Wait()
 }
 
@@ -191,6 +193,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	kv.applyCh = make(chan raft.ApplyMsg)
+  kv.stopQ = make(chan bool, 10)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
   kv.rf.SetMaxStateSize(maxraftstate)
 
@@ -262,18 +265,35 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
       }
       kv.lastAppliedIndex = msg.CommandIndex
       kv.rf.Log("Server Applied %+v\n", msg)
+      kv.Unlock()
+      return true
+    }
+    for run() { }
+  }()
+
+  kv.wg.Add(1)
+  go func() {
+    defer kv.wg.Done()
+    run := func() {
       var ss []byte
+      kv.Lock()
+      defer kv.Unlock()
       if kv.maxraftstate > 0 && kv.rf.RaftStateSize() > kv.maxraftstate {
         ss = snapshot()
       }
-      kv.Unlock()
       if ss != nil {
         kv.rf.Log("Server Compacting raft logs to %d", kv.lastAppliedIndex)
         kv.rf.CompactLogs(ss, kv.lastAppliedIndex)
       }
-      return true
     }
-    for run() { }
+    for {
+      select {
+        case <-stopQ:
+          return
+        case <-time.After(time.Duration(100) * time.Millisecond)
+          run()
+      }
+    }
   }()
 	return kv
 }

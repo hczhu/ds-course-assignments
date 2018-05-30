@@ -356,6 +356,10 @@ func (rf *Raft) Kill() {
   rf.live = false
   rf.applierWakeup<-false
   rf.notifyQ<-false
+  rf.stopQ<-true
+  rf.stopQ<-true
+  rf.stopQ<-true
+  rf.stopQ<-true
   rf.wg.Wait()
 }
 
@@ -824,8 +828,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
   rf.lastApplied = 0
 
   rf.applierWakeup = make(WakeupChan, 1000)
-  rf.appliedLogIndex = make(chan int, 1000)
   rf.notifyQ = make(chan bool, 10)
+  rf.stopQ = make(chan bool, 10)
   rf.live = true
 
   rf.cdata = CoreData {
@@ -870,9 +874,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
     rf.RUnlock()
 
     for {
-      live := <-rf.applierWakeup
-      if !live {
-        return
+      select {
+        case <-rf.applierWakeup:
+        case <-rf.stopQ:
+          return
       }
       for rf.lastApplied < rf.commitIndex {
         rf.Lock()
@@ -901,10 +906,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
           select {
             case rf.applyCh<-msg:
               sent = true
-            case live := <-rf.applierWakeup:
-              if !live {
-                return
-              }
+            case <-rf.applierWakeup:
+            case <-rf.stopQ:
+              return
           }
         }
         rf.Log("Sent %+v at term %d", msg, term)

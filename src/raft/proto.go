@@ -78,10 +78,11 @@ type Raft struct {
   matchIndex []int
 
   applierWakeup WakeupChan
-  appliedLogIndex chan int
+  stopQ chan bool
 
   // False mean termination
   notifyQ chan bool
+
 
 	sync.RWMutex
   cdata CoreData

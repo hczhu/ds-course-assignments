@@ -846,15 +846,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
   rf.leader = rf.cdata.VotedFor
   rf.commitIndex = rf.cdata.LastCompactedIndex
   rf.lastApplied = rf.cdata.LastCompactedIndex
-  if rf.snapshot != nil {
-    rf.Log("Notifying the initial snapshot")
-    // Notify the kv server of the initial snapshot 
-    rf.applyCh<-ApplyMsg{
-      InstallSnapshot: true,
-      Command: rf.snapshot,
-    }
-    rf.Log("Notified the initial snapshot")
-  }
 
   rf.Log("Made raft %+v", rf.cdata)
   rand.Seed(int64(time.Now().Nanosecond()))
@@ -863,6 +854,19 @@ func Make(peers []*labrpc.ClientEnd, me int,
   go func() {
     defer rf.Log("Applier is exiting.")
     defer rf.wg.Done()
+
+    rf.RLock()
+    if rf.snapshot != nil {
+      rf.Log("Notifying the initial snapshot")
+      // Notify the kv server of the initial snapshot 
+      rf.applyCh<-ApplyMsg{
+        InstallSnapshot: true,
+        Command: rf.snapshot,
+      }
+      rf.Log("Notified the initial snapshot")
+    }
+    rf.RUnlock()
+
     for {
       live := <-rf.applierWakeup
       if !live {

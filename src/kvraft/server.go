@@ -279,7 +279,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
       var ss []byte
       kv.Lock()
       defer kv.Unlock()
-      if kv.maxraftstate > 0 && kv.rf.RaftStateSize() > kv.maxraftstate {
+      if kv.maxraftstate > 0 && kv.rf.RaftStateSize() > kv.maxraftstate / 4 {
         ss = snapshot()
       }
       if ss != nil {

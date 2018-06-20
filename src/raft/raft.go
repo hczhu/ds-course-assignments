@@ -26,7 +26,7 @@ type Bytes []byte
 
 var gStartTime time.Time = time.Now()
 
-var gPrintLog bool = true
+var gPrintLog bool = false
 var gPersist bool = true
 
 func min(a, b int) int {

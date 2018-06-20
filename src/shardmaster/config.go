@@ -2,6 +2,7 @@ package shardmaster
 
 import "labrpc"
 import "raft"
+// import "kvraft"
 import "testing"
 import "os"
 
@@ -290,9 +291,12 @@ func (cfg *config) StartServer(i int) {
 
 	kvsvc := labrpc.MakeService(cfg.servers[i])
 	rfsvc := labrpc.MakeService(cfg.servers[i].rf)
+  kvserver := labrpc.MakeService(cfg.servers[i].kvserver)
+
 	srv := labrpc.MakeServer()
 	srv.AddService(kvsvc)
 	srv.AddService(rfsvc)
+	srv.AddService(kvserver)
 	cfg.net.AddServer(i, srv)
 }
 

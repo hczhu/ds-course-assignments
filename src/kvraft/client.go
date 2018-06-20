@@ -4,6 +4,7 @@ import "labrpc"
 import "crypto/rand"
 import "math/big"
 import "sync/atomic"
+import "time"
 // import "fmt"
 
 
@@ -46,6 +47,7 @@ func (ck *Clerk) tryAllServers(f func(serverId int)bool) {
         }
       }
     }
+    time.Sleep(100 * time.Millisecond)
     // fmt.Println("Tried all servers. No luck.")
   }
 }

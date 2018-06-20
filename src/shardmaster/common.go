@@ -1,5 +1,9 @@
 package shardmaster
 
+import "labgob"
+import "bytes"
+import "fmt"
+
 //
 // Master shard server: assigns shards to replication groups.
 //
@@ -30,6 +34,7 @@ type Config struct {
 
 const (
 	OK = "OK"
+  CONFIG_KEY = "config"
 )
 
 type Err string
@@ -70,4 +75,29 @@ type QueryReply struct {
 	WrongLeader bool
 	Err         Err
 	Config      Config
+}
+
+type Op struct {
+  Args interface{}
+}
+
+func decode(data string) Op {
+  op := Op{}
+	r := bytes.NewBuffer([]byte(data))
+	d := labgob.NewDecoder(r)
+  err := d.Decode(&op)
+  if err != nil {
+    fmt.Printf("Error: Decoding a string of length %d error: %+v\n", len(data), err)
+  }
+  return op
+}
+
+func encode(op Op) string {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+  err := e.Encode(op)
+  if err != nil {
+    fmt.Printf("Error: Encoding struct %+v error: %+v\n", op, err)
+  }
+	return w.String()
 }

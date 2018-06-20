@@ -33,6 +33,8 @@ type Snapshot struct {
   ClientLastSeq map[int64]uint64
 }
 
+type AppendCallback func(string, string)string
+
 type KVServer struct {
 	sync.RWMutex
 	me      int
@@ -50,6 +52,7 @@ type KVServer struct {
   wg sync.WaitGroup
 
   callerCh chan bool
+  appendCb AppendCallback
 }
 
 func (kv *KVServer) commitOne(cmd Cmd) int {
@@ -142,6 +145,14 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
   }
 }
 
+func (kv *KVServer) GetRaft() *raft.Raft {
+  return kv.rf
+}
+
+func (kv *KVServer) SetAppendCb(cb AppendCallback) {
+  kv.appendCb = cb
+}
+
 //
 // the tester calls Kill() when a KVServer instance won't
 // be needed again. you are not required to do anything
@@ -201,6 +212,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
   kv.kvMap = make(map[string]string)
   kv.clientLastSeq = make(map[int64]uint64)
   kv.callerCh = make(chan bool, 1000)
+  kv.appendCb = func(value string, ap string) string {
+    return value + ap
+  }
   // kv.cond = sync.NewCond(&sync.Mutex{})
 
   kv.wg.Add(1)
@@ -247,7 +261,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
           case OpPut:
             kv.kvMap[cmd.Key] = cmd.Value
           case OpAppend:
-            kv.kvMap[cmd.Key] += cmd.Value
+            kv.kvMap[cmd.Key] = kv.appendCb(kv.kvMap[cmd.Key], cmd.Value)
           case OpGet:
         }
         kv.clientLastSeq[cmd.ClientId] = cmd.Seq
@@ -279,7 +293,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
       var ss []byte
       kv.Lock()
       defer kv.Unlock()
-      if kv.maxraftstate > 0 && kv.rf.RaftStateSize() > kv.maxraftstate / 4 {
+      if kv.maxraftstate > 0 && kv.rf.RaftStateSize() > kv.maxraftstate / 8 {
         ss = snapshot()
       }
       if ss != nil {

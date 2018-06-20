@@ -26,7 +26,7 @@ type Bytes []byte
 
 var gStartTime time.Time = time.Now()
 
-var gPrintLog bool = false
+var gPrintLog bool = true
 var gPersist bool = true
 
 func min(a, b int) int {
@@ -36,7 +36,7 @@ func min(a, b int) int {
   return b
 }
 
-func (rf *Raft) assert(cond bool, format string, v ...interface {}) {
+func (rf *Raft) Assert(cond bool, format string, v ...interface {}) {
   if !cond {
     panic(fmt.Sprintf(format, v...) + fmt.Sprintf(" Rack struct: %+v", *rf))
   }
@@ -79,7 +79,7 @@ func (rf *Raft) persist() {
     case Candidate:
       fallthrough
     case Leader:
-      rf.assert(rf.cdata.VotedFor == rf.me, "A non-follower should vote for itself")
+      rf.Assert(rf.cdata.VotedFor == rf.me, "A non-follower should vote for itself")
   }
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
@@ -100,7 +100,7 @@ func (rf *Raft) readPersist(data []byte, snapshot Bytes) {
 
   cdata := CoreData{}
   err := d.Decode(&cdata)
-  rf.assert(err == nil, "Failed to restore the persisted data with error %+v.", err)
+  rf.Assert(err == nil, "Failed to restore the persisted data with error %+v.", err)
   rf.cdata = cdata
   rf.snapshot = snapshot
 }
@@ -159,7 +159,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestReply) {
     return
   }
   // This server must be a follower
-  rf.assert(cdata.Role == Follower, "Should be a follower")
+  rf.Assert(cdata.Role == Follower, "Should be a follower")
   lastTerm, lastIndex := cdata.LastLogTerm(), cdata.LastLogIndex()
   if lastTerm > args.LastLogTerm ||
       (lastTerm == args.LastLogTerm && lastIndex > args.LastLogIndex) {
@@ -749,7 +749,7 @@ func (rf *Raft) replicateLogs() {
     result := rf.MultiWait(replyChan, 0)
     switch {
       case result.timeout:
-        rf.assert(false, "Timeout is impossible")
+        rf.Assert(false, "Timeout is impossible")
         // Start over
         return
       case result.interrupted:
@@ -886,15 +886,15 @@ func Make(peers []*labrpc.ClientEnd, me int,
           CommandIndex: rf.lastApplied + 1,
         }
         term := 0
-        rf.assert(rf.lastApplied <= rf.commitIndex,
+        rf.Assert(rf.lastApplied <= rf.commitIndex,
           "lastApplied should <= rf.commitIndex")
         if rf.lastApplied == rf.commitIndex {
           rf.Unlock()
           break
         }
-        rf.assert(rf.cdata.GoodIndex(rf.lastApplied + 1), "rf.lastApplied %d is not good",
+        rf.Assert(rf.cdata.GoodIndex(rf.lastApplied + 1), "rf.lastApplied %d is not good",
           rf.lastApplied)
-        rf.assert(rf.lastApplied + 1 <= rf.cdata.LastLogIndex(),
+        rf.Assert(rf.lastApplied + 1 <= rf.cdata.LastLogIndex(),
           "last applied too large %d > %d.", rf.lastApplied, rf.cdata.LastLogIndex())
         msg.Command = rf.cdata.LogEntry(rf.lastApplied + 1).Cmd
         term = rf.cdata.LogEntry(rf.lastApplied + 1).Term
